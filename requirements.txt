@@ -1,5 +1,3 @@
 numpy
 pytest
-
-# added when we wire in real embeddings (Phase 2):
-# sentence-transformers
+sentence-transformers
