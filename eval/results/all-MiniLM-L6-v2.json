@@ -1,4 +1,7 @@
 {
+  "model_name": "all-MiniLM-L6-v2",
+  "model_dim": 384,
+  "run_at": "2026-08-21T18:42:15.128090+00:00",
   "pairs": [
     {
       "id": "p01",

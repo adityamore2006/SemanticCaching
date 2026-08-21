@@ -17,24 +17,38 @@ mode the project cares about (a wrong answer served with high confidence).
 Swapping this harness to grade HNSW instead of linear search (Phase 4) is
 a one-line change: create_index("linear", ...) -> create_index("hnsw", ...).
 Nothing else here should need to change.
+
+Run against a specific embedding model to compare it against prior runs:
+    python eval/threshold_sweep.py [model_name]
+Defaults to Embedder's default (all-MiniLM-L6-v2) if no model is given.
+Each run writes its own file under eval/results/<model_name>.json (so
+multiple models' results sit on disk side by side, nothing gets
+overwritten) and appends one summary row to eval/results/log.md.
 """
 
+import datetime
 import json
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from embedding import Embedder
+from embedding import DEFAULT_MODEL, Embedder
 from factory import create_index
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "eval_pairs.json")
-RESULTS_PATH = os.path.join(os.path.dirname(__file__), "results.json")
+RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+LOG_PATH = os.path.join(RESULTS_DIR, "log.md")
 
 # Swept independently of per-pair similarity computation, since similarity
 # only needs to be computed once per pair, classification against a
 # threshold is cheap to redo for every value in this range.
 THRESHOLDS = [round(0.50 + 0.05 * i, 2) for i in range(10)]  # 0.50 .. 0.95
+
+# Reference points logged in the summary table, so every model's run is
+# comparable at the same fixed thresholds rather than whatever looked
+# interesting for one particular model.
+LOG_REFERENCE_THRESHOLDS = [0.60, 0.70, 0.80]
 
 
 def load_pairs(path=DATA_PATH):
@@ -140,9 +154,44 @@ def print_table(rows):
         )
 
 
+def results_path_for(model_name):
+    slug = model_name.replace("/", "__")
+    return os.path.join(RESULTS_DIR, f"{slug}.json")
+
+
+def append_log_entry(embedder, threshold_rows):
+    """
+    One compact row per run in eval/results/log.md, so every model tried
+    is comparable at a glance without opening each full results file.
+    Reference thresholds are fixed (see LOG_REFERENCE_THRESHOLDS) so rows
+    line up across different models' runs.
+    """
+    by_threshold = {row["threshold"]: row for row in threshold_rows}
+    is_new_file = not os.path.exists(LOG_PATH)
+
+    with open(LOG_PATH, "a") as f:
+        if is_new_file:
+            cols = ["run_at (UTC)", "model", "dim"]
+            for t in LOG_REFERENCE_THRESHOLDS:
+                cols += [f"hit@{t}", f"near_miss_wrong@{t}"]
+            cols.append("results_file")
+            f.write("| " + " | ".join(cols) + " |\n")
+            f.write("|" + "---|" * len(cols) + "\n")
+
+        run_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M")
+        cells = [run_at, embedder.model_name, str(embedder.dim)]
+        for t in LOG_REFERENCE_THRESHOLDS:
+            row = by_threshold[t]
+            cells += [f"{row['hit_rate']:.2f}", f"{row['near_miss_wrong_rate']:.2f}"]
+        cells.append(f"`{os.path.relpath(results_path_for(embedder.model_name), os.path.dirname(__file__))}`")
+        f.write("| " + " | ".join(cells) + " |\n")
+
+
 def main():
+    model_name = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODEL
+
     pairs = load_pairs()
-    embedder = Embedder()
+    embedder = Embedder(model_name)
     print(f"embedding model: {embedder.model_name} (dim={embedder.dim})")
     print(f"loaded {len(pairs)} pairs from {DATA_PATH}")
 
@@ -155,9 +204,20 @@ def main():
     print()
     print_table(threshold_rows)
 
-    with open(RESULTS_PATH, "w") as f:
-        json.dump({"pairs": pair_results, "thresholds": threshold_rows}, f, indent=2)
-    print(f"\nwrote per-pair results and threshold sweep to {RESULTS_PATH}")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    results_path = results_path_for(embedder.model_name)
+    with open(results_path, "w") as f:
+        json.dump({
+            "model_name": embedder.model_name,
+            "model_dim": embedder.dim,
+            "run_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "pairs": pair_results,
+            "thresholds": threshold_rows,
+        }, f, indent=2)
+    append_log_entry(embedder, threshold_rows)
+
+    print(f"\nwrote per-pair results and threshold sweep to {results_path}")
+    print(f"appended summary row to {LOG_PATH}")
 
 
 if __name__ == "__main__":
