@@ -6,142 +6,1363 @@
     "unrelated": "query_b is a different feature area entirely, low lexical overlap. Easy negative, a sanity check that the pipeline isn't badly broken."
   },
   "pairs": [
-    {"id": "p01", "category": "paraphrase", "expected_match": true,
-     "query_a": "How do I reset my password?",
-     "query_b": "I forgot my password, how do I get back into my account?"},
-    {"id": "p02", "category": "paraphrase", "expected_match": true,
-     "query_a": "Can I get a refund for my subscription?",
-     "query_b": "I want my money back for this plan, is that possible?"},
-    {"id": "p03", "category": "paraphrase", "expected_match": true,
-     "query_a": "How do I add a teammate to my workspace?",
-     "query_b": "What's the process for inviting a new team member?"},
-    {"id": "p04", "category": "paraphrase", "expected_match": true,
-     "query_a": "Why is my file upload failing?",
-     "query_b": "My files won't upload, what's going wrong?"},
-    {"id": "p05", "category": "paraphrase", "expected_match": true,
-     "query_a": "How do I cancel my subscription?",
-     "query_b": "I'd like to stop my plan, how do I do that?"},
-    {"id": "p06", "category": "paraphrase", "expected_match": true,
-     "query_a": "Is there a mobile app for this?",
-     "query_b": "Do you have an app I can use on my phone?"},
-    {"id": "p07", "category": "paraphrase", "expected_match": true,
-     "query_a": "How much storage do I get on the free plan?",
-     "query_b": "What's the storage limit for a free account?"},
-    {"id": "p08", "category": "paraphrase", "expected_match": true,
-     "query_a": "How do I export all my data?",
-     "query_b": "Can I download a copy of everything I've stored?"},
-    {"id": "p09", "category": "paraphrase", "expected_match": true,
-     "query_a": "Does this integrate with Slack?",
-     "query_b": "Can I connect my Slack workspace to this?"},
-    {"id": "p10", "category": "paraphrase", "expected_match": true,
-     "query_a": "How do I generate an API key?",
-     "query_b": "Where do I create a new API key?"},
-    {"id": "p11", "category": "paraphrase", "expected_match": true,
-     "query_a": "Why can't I log in?",
-     "query_b": "I'm unable to sign into my account, what's happening?"},
-    {"id": "p12", "category": "paraphrase", "expected_match": true,
-     "query_a": "How do I turn off email notifications?",
-     "query_b": "I want to stop getting emails from you, how do I disable that?"},
-    {"id": "p13", "category": "paraphrase", "expected_match": true,
-     "query_a": "Can I share a folder with someone outside my team?",
-     "query_b": "Is it possible to give an external person access to a folder?"},
-    {"id": "p14", "category": "paraphrase", "expected_match": true,
-     "query_a": "What happens to my files if I delete my account?",
-     "query_b": "If I close my account, do my files get deleted too?"},
-    {"id": "p15", "category": "paraphrase", "expected_match": true,
-     "query_a": "How do I upgrade to a paid plan?",
-     "query_b": "What's the process for moving from free to a paid tier?"},
-    {"id": "p16", "category": "paraphrase", "expected_match": true,
-     "query_a": "Can I recover a file I accidentally deleted?",
-     "query_b": "I deleted something by mistake, can I get it back?"},
-    {"id": "p17", "category": "paraphrase", "expected_match": true,
-     "query_a": "Do you offer discounts for students?",
-     "query_b": "Is there a student pricing plan?"},
-    {"id": "p18", "category": "paraphrase", "expected_match": true,
-     "query_a": "How do I change the email address on my account?",
-     "query_b": "I need to update the email tied to my account, how?"},
-
-    {"id": "nm01", "category": "near_miss", "expected_match": false,
-     "query_a": "How do I reset my password?",
-     "query_b": "How do I reset my two-factor authentication device?"},
-    {"id": "nm02", "category": "near_miss", "expected_match": false,
-     "query_a": "Can I get a refund for my subscription?",
-     "query_b": "Can I get a refund for an in-app purchase I made by mistake?"},
-    {"id": "nm03", "category": "near_miss", "expected_match": false,
-     "query_a": "How do I add a teammate to my workspace?",
-     "query_b": "How do I remove a teammate from my workspace?"},
-    {"id": "nm04", "category": "near_miss", "expected_match": false,
-     "query_a": "Why is my file upload failing?",
-     "query_b": "Why is my file download failing?"},
-    {"id": "nm05", "category": "near_miss", "expected_match": false,
-     "query_a": "How do I cancel my subscription?",
-     "query_b": "How do I pause my subscription instead of canceling?"},
-    {"id": "nm06", "category": "near_miss", "expected_match": false,
-     "query_a": "Is there a mobile app for this?",
-     "query_b": "Is there a desktop app for this?"},
-    {"id": "nm07", "category": "near_miss", "expected_match": false,
-     "query_a": "How much storage do I get on the free plan?",
-     "query_b": "How much does extra storage cost on the paid plan?"},
-    {"id": "nm08", "category": "near_miss", "expected_match": false,
-     "query_a": "How do I export all my data?",
-     "query_b": "How do I import data from another service?"},
-    {"id": "nm09", "category": "near_miss", "expected_match": false,
-     "query_a": "Does this integrate with Slack?",
-     "query_b": "Does this integrate with Microsoft Teams?"},
-    {"id": "nm10", "category": "near_miss", "expected_match": false,
-     "query_a": "How do I generate an API key?",
-     "query_b": "How do I revoke an API key?"},
-    {"id": "nm11", "category": "near_miss", "expected_match": false,
-     "query_a": "Why can't I log in?",
-     "query_b": "Why does the app keep logging me out?"},
-    {"id": "nm12", "category": "near_miss", "expected_match": false,
-     "query_a": "How do I turn off email notifications?",
-     "query_b": "How do I turn off push notifications on mobile?"},
-    {"id": "nm13", "category": "near_miss", "expected_match": false,
-     "query_a": "Can I share a folder with someone outside my team?",
-     "query_b": "Can I share a single file link with someone without giving folder access?"},
-    {"id": "nm14", "category": "near_miss", "expected_match": false,
-     "query_a": "What happens to my files if I delete my account?",
-     "query_b": "What happens to my files if I downgrade to the free plan?"},
-    {"id": "nm15", "category": "near_miss", "expected_match": false,
-     "query_a": "How do I upgrade to a paid plan?",
-     "query_b": "How do I switch from monthly to annual billing?"},
-    {"id": "nm16", "category": "near_miss", "expected_match": false,
-     "query_a": "Can I recover a file I accidentally deleted?",
-     "query_b": "Can I see the version history of a file I've edited?"},
-    {"id": "nm17", "category": "near_miss", "expected_match": false,
-     "query_a": "Do you offer discounts for students?",
-     "query_b": "Do you offer discounts for nonprofits?"},
-    {"id": "nm18", "category": "near_miss", "expected_match": false,
-     "query_a": "How do I change the email address on my account?",
-     "query_b": "How do I change the display name on my account?"},
-
-    {"id": "u01", "category": "unrelated", "expected_match": false,
-     "query_a": "How do I reset my password?",
-     "query_b": "Can I customize the color theme or appearance of the app?"},
-    {"id": "u02", "category": "unrelated", "expected_match": false,
-     "query_a": "Can I get a refund for my subscription?",
-     "query_b": "Do you support keyboard shortcuts for common actions?"},
-    {"id": "u03", "category": "unrelated", "expected_match": false,
-     "query_a": "How do I add a teammate to my workspace?",
-     "query_b": "Is there an offline mode so I can work without internet access?"},
-    {"id": "u04", "category": "unrelated", "expected_match": false,
-     "query_a": "Is there a mobile app for this?",
-     "query_b": "What are your customer support hours?"},
-    {"id": "u05", "category": "unrelated", "expected_match": false,
-     "query_a": "How do I cancel my subscription?",
-     "query_b": "Does the app support screen readers for accessibility?"},
-    {"id": "u06", "category": "unrelated", "expected_match": false,
-     "query_a": "How do I export all my data?",
-     "query_b": "Can I change the language the interface is displayed in?"},
-    {"id": "u07", "category": "unrelated", "expected_match": false,
-     "query_a": "Do you offer discounts for students?",
-     "query_b": "Do you have a public roadmap of upcoming features?"},
-    {"id": "u08", "category": "unrelated", "expected_match": false,
-     "query_a": "What happens to my files if I delete my account?",
-     "query_b": "What browsers are supported for using the web app?"},
-    {"id": "u09", "category": "unrelated", "expected_match": false,
-     "query_a": "Can I share a folder with someone outside my team?",
-     "query_b": "Is my data encrypted at rest and in transit?"}
+    {
+      "id": "p001",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I reset my password?",
+      "query_b": "I forgot my password, how do I get back into my account?"
+    },
+    {
+      "id": "nm001",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I reset my password?",
+      "query_b": "How do I reset my two-factor authentication device?"
+    },
+    {
+      "id": "p002",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Why can't I log in?",
+      "query_b": "I'm unable to sign into my account, what's happening?"
+    },
+    {
+      "id": "nm002",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Why can't I log in?",
+      "query_b": "Why does the app keep logging me out?"
+    },
+    {
+      "id": "p003",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I change the email address on my account?",
+      "query_b": "I need to update the email tied to my account, how?"
+    },
+    {
+      "id": "nm003",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I change the email address on my account?",
+      "query_b": "How do I change the display name on my account?"
+    },
+    {
+      "id": "p004",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I permanently delete my account?",
+      "query_b": "I want to close my account for good, what's the process?"
+    },
+    {
+      "id": "nm004",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I permanently delete my account?",
+      "query_b": "How do I temporarily deactivate my account instead of deleting it?"
+    },
+    {
+      "id": "p005",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How long until I get logged out from being idle?",
+      "query_b": "What's the inactivity timeout before I'm signed out automatically?"
+    },
+    {
+      "id": "nm005",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How long until I get logged out from being idle?",
+      "query_b": "How do I stay logged in permanently and skip the timeout?"
+    },
+    {
+      "id": "p006",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I set a new password while I'm already signed in?",
+      "query_b": "Where do I go to update my current password from within my account settings?"
+    },
+    {
+      "id": "nm006",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I set a new password while I'm already signed in?",
+      "query_b": "How do I recover my account if I lost access to my recovery email?"
+    },
+    {
+      "id": "p007",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I turn on two-factor authentication?",
+      "query_b": "How do I set up 2FA for extra account security?"
+    },
+    {
+      "id": "nm007",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I turn on two-factor authentication?",
+      "query_b": "How do I turn off two-factor authentication?"
+    },
+    {
+      "id": "p008",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I merge two accounts into one?",
+      "query_b": "Is it possible to combine my two separate accounts?"
+    },
+    {
+      "id": "nm008",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I merge two accounts into one?",
+      "query_b": "Can I switch between multiple accounts without logging out?"
+    },
+    {
+      "id": "p009",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I get a refund for my subscription?",
+      "query_b": "I want my money back for this plan, is that possible?"
+    },
+    {
+      "id": "nm009",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I get a refund for my subscription?",
+      "query_b": "Can I get a refund for an in-app purchase I made by mistake?"
+    },
+    {
+      "id": "p010",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I cancel my subscription?",
+      "query_b": "I no longer want to keep paying for this, how do I cancel completely?"
+    },
+    {
+      "id": "nm010",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I cancel my subscription?",
+      "query_b": "How do I pause my subscription instead of canceling?"
+    },
+    {
+      "id": "p011",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I upgrade to a paid plan?",
+      "query_b": "What's the process for moving from free to a paid tier?"
+    },
+    {
+      "id": "nm011",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I upgrade to a paid plan?",
+      "query_b": "How do I switch from monthly to annual billing?"
+    },
+    {
+      "id": "p012",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I downgrade to a cheaper plan?",
+      "query_b": "What's the process for moving to a lower tier plan?"
+    },
+    {
+      "id": "nm012",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I downgrade to a cheaper plan?",
+      "query_b": "What happens to my data if I downgrade my plan?"
+    },
+    {
+      "id": "p013",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Do you offer discounts for students?",
+      "query_b": "Is there a student pricing plan?"
+    },
+    {
+      "id": "nm013",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Do you offer discounts for students?",
+      "query_b": "Do you offer discounts for nonprofits?"
+    },
+    {
+      "id": "p014",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I update my payment method?",
+      "query_b": "Where do I change the card on file for billing?"
+    },
+    {
+      "id": "nm014",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I update my payment method?",
+      "query_b": "Why was my payment declined?"
+    },
+    {
+      "id": "p015",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I download an invoice for my subscription?",
+      "query_b": "Where can I find a receipt for my last payment?"
+    },
+    {
+      "id": "nm015",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I download an invoice for my subscription?",
+      "query_b": "How do I add my company's tax ID to my invoices?"
+    },
+    {
+      "id": "p016",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "What's the price difference between monthly and annual billing?",
+      "query_b": "How much do I save by paying yearly instead of monthly?"
+    },
+    {
+      "id": "nm016",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "What's the price difference between monthly and annual billing?",
+      "query_b": "Can I switch back to monthly after choosing annual billing?"
+    },
+    {
+      "id": "p017",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Why is my file upload failing?",
+      "query_b": "My files won't upload, what's going wrong?"
+    },
+    {
+      "id": "nm017",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Why is my file upload failing?",
+      "query_b": "Why is my file download failing?"
+    },
+    {
+      "id": "p018",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How much storage do I get on the free plan?",
+      "query_b": "What's the storage limit for a free account?"
+    },
+    {
+      "id": "nm018",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How much storage do I get on the free plan?",
+      "query_b": "How much does extra storage cost on the paid plan?"
+    },
+    {
+      "id": "p019",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I export all my data?",
+      "query_b": "Can I download a copy of everything I've stored?"
+    },
+    {
+      "id": "nm019",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I export all my data?",
+      "query_b": "How do I import data from another service?"
+    },
+    {
+      "id": "p020",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I recover a file I accidentally deleted?",
+      "query_b": "I deleted something by mistake, can I get it back?"
+    },
+    {
+      "id": "nm020",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I recover a file I accidentally deleted?",
+      "query_b": "Can I see the version history of a file I've edited?"
+    },
+    {
+      "id": "p021",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Is there a maximum file size I can upload?",
+      "query_b": "What's the largest file size allowed for a single upload?"
+    },
+    {
+      "id": "nm021",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Is there a maximum file size I can upload?",
+      "query_b": "Is there a limit on how many files I can upload total?"
+    },
+    {
+      "id": "p022",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I find duplicate files in my account?",
+      "query_b": "Is there a way to detect files I've uploaded more than once?"
+    },
+    {
+      "id": "nm022",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I find duplicate files in my account?",
+      "query_b": "How do I merge two folders that have the same name?"
+    },
+    {
+      "id": "p023",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I restore an older version of a file?",
+      "query_b": "How do I roll back a file to a previous save?"
+    },
+    {
+      "id": "nm023",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I restore an older version of a file?",
+      "query_b": "How long do you keep file version history before deleting it?"
+    },
+    {
+      "id": "p024",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I delete multiple files at once?",
+      "query_b": "Is there a way to select and remove several files together?"
+    },
+    {
+      "id": "nm024",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I delete multiple files at once?",
+      "query_b": "How do I permanently empty my trash folder?"
+    },
+    {
+      "id": "p025",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I share a folder with someone outside my team?",
+      "query_b": "Is it possible to give an external person access to a folder?"
+    },
+    {
+      "id": "nm025",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I share a folder with someone outside my team?",
+      "query_b": "Can I share a single file link with someone without giving folder access?"
+    },
+    {
+      "id": "p026",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I add a teammate to my workspace?",
+      "query_b": "What's the process for inviting a new team member?"
+    },
+    {
+      "id": "nm026",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I add a teammate to my workspace?",
+      "query_b": "How do I remove a teammate from my workspace?"
+    },
+    {
+      "id": "p027",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I change someone's permission level on a shared folder?",
+      "query_b": "How do I edit an existing collaborator's permission level on a folder?"
+    },
+    {
+      "id": "nm027",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I change someone's permission level on a shared folder?",
+      "query_b": "How do I see who currently has access to a folder?"
+    },
+    {
+      "id": "p028",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I transfer ownership of a file to someone else?",
+      "query_b": "Can I hand off a document so another person becomes the owner?"
+    },
+    {
+      "id": "nm028",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I transfer ownership of a file to someone else?",
+      "query_b": "How do I make a copy of a file for someone else without changing the original owner?"
+    },
+    {
+      "id": "p029",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I leave a comment on a shared document?",
+      "query_b": "Can I add feedback directly on a file someone shared with me?"
+    },
+    {
+      "id": "nm029",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I leave a comment on a shared document?",
+      "query_b": "How do I turn off comments on a document I own?"
+    },
+    {
+      "id": "p030",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can multiple people edit a document at the same time?",
+      "query_b": "Does this support real-time collaborative editing?"
+    },
+    {
+      "id": "nm030",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can multiple people edit a document at the same time?",
+      "query_b": "How do I lock a document so only I can edit it?"
+    },
+    {
+      "id": "p031",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I set an expiration date on a shared link?",
+      "query_b": "How do I make a shared link stop working after a certain date?"
+    },
+    {
+      "id": "nm031",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I set an expiration date on a shared link?",
+      "query_b": "How do I password protect a shared link?"
+    },
+    {
+      "id": "p032",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Does this integrate with Slack?",
+      "query_b": "Can I connect my Slack workspace to this?"
+    },
+    {
+      "id": "nm032",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Does this integrate with Slack?",
+      "query_b": "Does this integrate with Microsoft Teams?"
+    },
+    {
+      "id": "p033",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I generate an API key?",
+      "query_b": "Where do I create a new API key?"
+    },
+    {
+      "id": "nm033",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I generate an API key?",
+      "query_b": "How do I revoke an API key?"
+    },
+    {
+      "id": "p034",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I connect this to Zapier?",
+      "query_b": "Is there a Zapier integration available?"
+    },
+    {
+      "id": "nm034",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I connect this to Zapier?",
+      "query_b": "Can I connect this to Make (formerly Integromat)?"
+    },
+    {
+      "id": "p035",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I sync this with my Google Calendar?",
+      "query_b": "Is there a way to connect my calendar to see deadlines here?"
+    },
+    {
+      "id": "nm035",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I sync this with my Google Calendar?",
+      "query_b": "Can I sync this with my email inbox instead of my calendar?"
+    },
+    {
+      "id": "p036",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Do you support webhooks for event notifications?",
+      "query_b": "Can I get a webhook callback when something changes?"
+    },
+    {
+      "id": "nm036",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Do you support webhooks for event notifications?",
+      "query_b": "Do you support scheduled batch exports instead of webhooks?"
+    },
+    {
+      "id": "p037",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "What's the rate limit on the API?",
+      "query_b": "How many API requests am I allowed to make per minute?"
+    },
+    {
+      "id": "nm037",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "What's the rate limit on the API?",
+      "query_b": "What's the maximum file size I can upload through the API?"
+    },
+    {
+      "id": "p038",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I set up single sign-on for my company?",
+      "query_b": "Can I configure SSO so employees log in with our company account?"
+    },
+    {
+      "id": "nm038",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I set up single sign-on for my company?",
+      "query_b": "How do I set up two-factor authentication for my company's admin account?"
+    },
+    {
+      "id": "p039",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Is there a mobile app for this?",
+      "query_b": "Do you have an app I can use on my phone?"
+    },
+    {
+      "id": "nm039",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Is there a mobile app for this?",
+      "query_b": "Is there a desktop app for this?"
+    },
+    {
+      "id": "p040",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I use the app without an internet connection?",
+      "query_b": "Is there an offline mode for when I don't have Wi-Fi?"
+    },
+    {
+      "id": "nm040",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I use the app without an internet connection?",
+      "query_b": "How do I know if my files are fully synced before going offline?"
+    },
+    {
+      "id": "p041",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "What happens if I edit the same file offline on two devices?",
+      "query_b": "How are conflicting edits handled when I've been working offline?"
+    },
+    {
+      "id": "nm041",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "What happens if I edit the same file offline on two devices?",
+      "query_b": "How do I manually trigger a sync instead of waiting for it automatically?"
+    },
+    {
+      "id": "p042",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I turn off desktop notifications?",
+      "query_b": "Can I disable pop-up alerts on my computer?"
+    },
+    {
+      "id": "nm042",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I turn off desktop notifications?",
+      "query_b": "How do I turn off notifications on my phone specifically?"
+    },
+    {
+      "id": "p043",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I update the app to the latest version?",
+      "query_b": "Where do I check for and install app updates?"
+    },
+    {
+      "id": "nm043",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I update the app to the latest version?",
+      "query_b": "How do I roll back to a previous version of the app?"
+    },
+    {
+      "id": "p044",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Does the app work well on tablets?",
+      "query_b": "Is there a tablet-optimized version of the app?"
+    },
+    {
+      "id": "nm044",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Does the app work well on tablets?",
+      "query_b": "Does the app support external keyboards on tablets?"
+    },
+    {
+      "id": "p045",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I add a widget to my home screen?",
+      "query_b": "Is there a home screen widget available for quick access?"
+    },
+    {
+      "id": "nm045",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I add a widget to my home screen?",
+      "query_b": "Can I pin the app to my browser toolbar instead?"
+    },
+    {
+      "id": "p046",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I turn off email notifications?",
+      "query_b": "I want to stop getting emails from you, how do I disable that?"
+    },
+    {
+      "id": "nm046",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I turn off email notifications?",
+      "query_b": "How do I turn off push notifications on mobile?"
+    },
+    {
+      "id": "p047",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I get notified when someone mentions me?",
+      "query_b": "Can I turn on alerts for when I'm tagged in a comment?"
+    },
+    {
+      "id": "nm047",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I get notified when someone mentions me?",
+      "query_b": "How do I get notified when a file I own is edited?"
+    },
+    {
+      "id": "p048",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I change how often I get summary emails?",
+      "query_b": "How do I adjust the frequency of digest notifications?"
+    },
+    {
+      "id": "nm048",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I change how often I get summary emails?",
+      "query_b": "Can I choose which types of activity show up in my digest?"
+    },
+    {
+      "id": "p049",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I change the notification sound?",
+      "query_b": "Is there a way to pick a custom alert sound for notifications?"
+    },
+    {
+      "id": "nm049",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I change the notification sound?",
+      "query_b": "Can I set different sounds for different types of activity?"
+    },
+    {
+      "id": "p050",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I temporarily pause all notifications?",
+      "query_b": "Is there a do-not-disturb mode for notifications?"
+    },
+    {
+      "id": "nm050",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I temporarily pause all notifications?",
+      "query_b": "Can I permanently mute notifications from one specific teammate?"
+    },
+    {
+      "id": "p051",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I see an audit log of account activity?",
+      "query_b": "Is there a way to view a history of actions taken on the account?"
+    },
+    {
+      "id": "nm051",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I see an audit log of account activity?",
+      "query_b": "Can I export the audit log to a CSV file?"
+    },
+    {
+      "id": "p052",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Is my data encrypted?",
+      "query_b": "Do you encrypt files stored on your servers?"
+    },
+    {
+      "id": "nm052",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Is my data encrypted?",
+      "query_b": "Is my data encrypted while it's being uploaded, not just at rest?"
+    },
+    {
+      "id": "p053",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I request deletion of my data under GDPR?",
+      "query_b": "Can I formally request that my personal data be erased?"
+    },
+    {
+      "id": "nm053",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I request deletion of my data under GDPR?",
+      "query_b": "How do I download all my personal data under GDPR?"
+    },
+    {
+      "id": "p054",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I access the admin console for my organization?",
+      "query_b": "Where do I go to manage settings for my whole team?"
+    },
+    {
+      "id": "nm054",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I access the admin console for my organization?",
+      "query_b": "How do I add a second admin to my organization?"
+    },
+    {
+      "id": "p055",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I restrict account access to specific IP addresses?",
+      "query_b": "Is there a way to only allow logins from certain IP ranges?"
+    },
+    {
+      "id": "nm055",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I restrict account access to specific IP addresses?",
+      "query_b": "Can I block a specific user from logging in?"
+    },
+    {
+      "id": "p056",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I automatically provision new employee accounts?",
+      "query_b": "Is there a way to auto-create accounts when we hire someone new?"
+    },
+    {
+      "id": "nm056",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I automatically provision new employee accounts?",
+      "query_b": "Can I automatically deactivate accounts when someone leaves the company?"
+    },
+    {
+      "id": "p057",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Are you SOC 2 compliant?",
+      "query_b": "Do you have SOC 2 certification?"
+    },
+    {
+      "id": "nm057",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Are you SOC 2 compliant?",
+      "query_b": "Are you HIPAA compliant?"
+    },
+    {
+      "id": "p058",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I contact customer support?",
+      "query_b": "What's the best way to reach your support team?"
+    },
+    {
+      "id": "nm058",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I contact customer support?",
+      "query_b": "How do I contact sales instead of support?"
+    },
+    {
+      "id": "p059",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "What are your customer support hours?",
+      "query_b": "When is your support team available?"
+    },
+    {
+      "id": "nm059",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "What are your customer support hours?",
+      "query_b": "What's your average response time for support tickets?"
+    },
+    {
+      "id": "p060",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Is there a status page to check for outages?",
+      "query_b": "Where can I see if there's a service outage right now?"
+    },
+    {
+      "id": "nm060",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Is there a status page to check for outages?",
+      "query_b": "Where can I see your changelog of recent updates?"
+    },
+    {
+      "id": "p061",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "How do I submit a feature request?",
+      "query_b": "Where do I suggest a new feature idea?"
+    },
+    {
+      "id": "nm061",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "How do I submit a feature request?",
+      "query_b": "How do I report a bug I found?"
+    },
+    {
+      "id": "p062",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Do you have a public roadmap of upcoming features?",
+      "query_b": "Is there somewhere I can see what features are planned next?"
+    },
+    {
+      "id": "nm062",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Do you have a public roadmap of upcoming features?",
+      "query_b": "Do you have a changelog of features already released?"
+    },
+    {
+      "id": "p063",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Is there a community forum for users?",
+      "query_b": "Do you have a discussion board where users can help each other?"
+    },
+    {
+      "id": "nm063",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Is there a community forum for users?",
+      "query_b": "Do you have a Discord server for users?"
+    },
+    {
+      "id": "p064",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I customize the color theme or appearance of the app?",
+      "query_b": "Is there a way to change how the app looks visually?"
+    },
+    {
+      "id": "nm064",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I customize the color theme or appearance of the app?",
+      "query_b": "Can I customize which columns show up in the file list view?"
+    },
+    {
+      "id": "p065",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Do you support keyboard shortcuts for common actions?",
+      "query_b": "Are there hotkeys I can use instead of clicking through menus?"
+    },
+    {
+      "id": "nm065",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Do you support keyboard shortcuts for common actions?",
+      "query_b": "Can I customize which actions are assigned to which keyboard shortcuts?"
+    },
+    {
+      "id": "p066",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Does the app support screen readers for accessibility?",
+      "query_b": "Is the app compatible with assistive screen reading technology?"
+    },
+    {
+      "id": "nm066",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Does the app support screen readers for accessibility?",
+      "query_b": "Does the app support high-contrast mode for low vision users?"
+    },
+    {
+      "id": "p067",
+      "category": "paraphrase",
+      "expected_match": true,
+      "query_a": "Can I change the language the interface is displayed in?",
+      "query_b": "Is there a way to switch the app's display language?"
+    },
+    {
+      "id": "nm067",
+      "category": "near_miss",
+      "expected_match": false,
+      "query_a": "Can I change the language the interface is displayed in?",
+      "query_b": "Can I change my time zone setting without changing the display language?"
+    },
+    {
+      "id": "u001",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I reset my password?",
+      "query_b": "Can I get a discount if I refer a friend who signs up?"
+    },
+    {
+      "id": "u002",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Why can't I log in?",
+      "query_b": "Is there a browser extension available?"
+    },
+    {
+      "id": "u003",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I change the email address on my account?",
+      "query_b": "Can I print directly from the app?"
+    },
+    {
+      "id": "u004",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I permanently delete my account?",
+      "query_b": "Do you support custom domains for shared links?"
+    },
+    {
+      "id": "u005",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How long until I get logged out from being idle?",
+      "query_b": "Is there a way to watermark exported PDFs?"
+    },
+    {
+      "id": "u006",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I set a new password while I'm already signed in?",
+      "query_b": "Can I set a custom logo for my organization's workspace?"
+    },
+    {
+      "id": "u007",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I turn on two-factor authentication?",
+      "query_b": "Do you offer an enterprise trial before purchasing?"
+    },
+    {
+      "id": "u008",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I merge two accounts into one?",
+      "query_b": "Can I attend a live onboarding training session?"
+    },
+    {
+      "id": "u009",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I get a refund for my subscription?",
+      "query_b": "Is there a certification program for power users?"
+    },
+    {
+      "id": "u010",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I cancel my subscription?",
+      "query_b": "Do you sponsor open source projects?"
+    },
+    {
+      "id": "u011",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I upgrade to a paid plan?",
+      "query_b": "Is there a marketplace for third-party plugins?"
+    },
+    {
+      "id": "u012",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I downgrade to a cheaper plan?",
+      "query_b": "Do you have swag or merchandise for sale?"
+    },
+    {
+      "id": "u013",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Do you offer discounts for students?",
+      "query_b": "Can I host a local meetup and get company sponsorship?"
+    },
+    {
+      "id": "u014",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I update my payment method?",
+      "query_b": "Is there a way to benchmark my account's performance against similar teams?"
+    },
+    {
+      "id": "u015",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I download an invoice for my subscription?",
+      "query_b": "Do you have a newsletter I can subscribe to?"
+    },
+    {
+      "id": "u016",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "What's the price difference between monthly and annual billing?",
+      "query_b": "Can I get a discount if I refer a friend who signs up?"
+    },
+    {
+      "id": "u017",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Why is my file upload failing?",
+      "query_b": "Is there a browser extension available?"
+    },
+    {
+      "id": "u018",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How much storage do I get on the free plan?",
+      "query_b": "Can I print directly from the app?"
+    },
+    {
+      "id": "u019",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I export all my data?",
+      "query_b": "Do you support custom domains for shared links?"
+    },
+    {
+      "id": "u020",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I recover a file I accidentally deleted?",
+      "query_b": "Is there a way to watermark exported PDFs?"
+    },
+    {
+      "id": "u021",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Is there a maximum file size I can upload?",
+      "query_b": "Can I set a custom logo for my organization's workspace?"
+    },
+    {
+      "id": "u022",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I find duplicate files in my account?",
+      "query_b": "Do you offer an enterprise trial before purchasing?"
+    },
+    {
+      "id": "u023",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I restore an older version of a file?",
+      "query_b": "Can I attend a live onboarding training session?"
+    },
+    {
+      "id": "u024",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I delete multiple files at once?",
+      "query_b": "Is there a certification program for power users?"
+    },
+    {
+      "id": "u025",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I share a folder with someone outside my team?",
+      "query_b": "Do you sponsor open source projects?"
+    },
+    {
+      "id": "u026",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I add a teammate to my workspace?",
+      "query_b": "Is there a marketplace for third-party plugins?"
+    },
+    {
+      "id": "u027",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I change someone's permission level on a shared folder?",
+      "query_b": "Do you have swag or merchandise for sale?"
+    },
+    {
+      "id": "u028",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I transfer ownership of a file to someone else?",
+      "query_b": "Can I host a local meetup and get company sponsorship?"
+    },
+    {
+      "id": "u029",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I leave a comment on a shared document?",
+      "query_b": "Is there a way to benchmark my account's performance against similar teams?"
+    },
+    {
+      "id": "u030",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can multiple people edit a document at the same time?",
+      "query_b": "Do you have a newsletter I can subscribe to?"
+    },
+    {
+      "id": "u031",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I set an expiration date on a shared link?",
+      "query_b": "Can I get a discount if I refer a friend who signs up?"
+    },
+    {
+      "id": "u032",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Does this integrate with Slack?",
+      "query_b": "Is there a browser extension available?"
+    },
+    {
+      "id": "u033",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I generate an API key?",
+      "query_b": "Can I print directly from the app?"
+    },
+    {
+      "id": "u034",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I connect this to Zapier?",
+      "query_b": "Do you support custom domains for shared links?"
+    },
+    {
+      "id": "u035",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I sync this with my Google Calendar?",
+      "query_b": "Is there a way to watermark exported PDFs?"
+    },
+    {
+      "id": "u036",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Do you support webhooks for event notifications?",
+      "query_b": "Can I set a custom logo for my organization's workspace?"
+    },
+    {
+      "id": "u037",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "What's the rate limit on the API?",
+      "query_b": "Do you offer an enterprise trial before purchasing?"
+    },
+    {
+      "id": "u038",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I set up single sign-on for my company?",
+      "query_b": "Can I attend a live onboarding training session?"
+    },
+    {
+      "id": "u039",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Is there a mobile app for this?",
+      "query_b": "Is there a certification program for power users?"
+    },
+    {
+      "id": "u040",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I use the app without an internet connection?",
+      "query_b": "Do you sponsor open source projects?"
+    },
+    {
+      "id": "u041",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "What happens if I edit the same file offline on two devices?",
+      "query_b": "Is there a marketplace for third-party plugins?"
+    },
+    {
+      "id": "u042",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I turn off desktop notifications?",
+      "query_b": "Do you have swag or merchandise for sale?"
+    },
+    {
+      "id": "u043",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I update the app to the latest version?",
+      "query_b": "Can I host a local meetup and get company sponsorship?"
+    },
+    {
+      "id": "u044",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Does the app work well on tablets?",
+      "query_b": "Is there a way to benchmark my account's performance against similar teams?"
+    },
+    {
+      "id": "u045",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I add a widget to my home screen?",
+      "query_b": "Do you have a newsletter I can subscribe to?"
+    },
+    {
+      "id": "u046",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I turn off email notifications?",
+      "query_b": "Can I get a discount if I refer a friend who signs up?"
+    },
+    {
+      "id": "u047",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I get notified when someone mentions me?",
+      "query_b": "Is there a browser extension available?"
+    },
+    {
+      "id": "u048",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I change how often I get summary emails?",
+      "query_b": "Can I print directly from the app?"
+    },
+    {
+      "id": "u049",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I change the notification sound?",
+      "query_b": "Do you support custom domains for shared links?"
+    },
+    {
+      "id": "u050",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I temporarily pause all notifications?",
+      "query_b": "Is there a way to watermark exported PDFs?"
+    },
+    {
+      "id": "u051",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I see an audit log of account activity?",
+      "query_b": "Can I set a custom logo for my organization's workspace?"
+    },
+    {
+      "id": "u052",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Is my data encrypted?",
+      "query_b": "Do you offer an enterprise trial before purchasing?"
+    },
+    {
+      "id": "u053",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I request deletion of my data under GDPR?",
+      "query_b": "Can I attend a live onboarding training session?"
+    },
+    {
+      "id": "u054",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I access the admin console for my organization?",
+      "query_b": "Is there a certification program for power users?"
+    },
+    {
+      "id": "u055",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I restrict account access to specific IP addresses?",
+      "query_b": "Do you sponsor open source projects?"
+    },
+    {
+      "id": "u056",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Can I automatically provision new employee accounts?",
+      "query_b": "Is there a marketplace for third-party plugins?"
+    },
+    {
+      "id": "u057",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Are you SOC 2 compliant?",
+      "query_b": "Do you have swag or merchandise for sale?"
+    },
+    {
+      "id": "u058",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "How do I contact customer support?",
+      "query_b": "Can I host a local meetup and get company sponsorship?"
+    },
+    {
+      "id": "u059",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "What are your customer support hours?",
+      "query_b": "Is there a way to benchmark my account's performance against similar teams?"
+    },
+    {
+      "id": "u060",
+      "category": "unrelated",
+      "expected_match": false,
+      "query_a": "Is there a status page to check for outages?",
+      "query_b": "Do you have a newsletter I can subscribe to?"
+    }
   ]
 }

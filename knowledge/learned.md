@@ -110,3 +110,43 @@ The `Embedder(model_name)` swap was tested for real, four times, without touchin
 - **The threshold is tied to the model, not portable across a swap.** The whole point of section 8's table is that `0.70` means something different on every model tested. Swapping models later means rerunning the threshold sweep and re-deriving an operating threshold, the old number doesn't carry over.
 
 ---
+
+## 10. Scaling the eval set: automated verification beats manual eyeballing
+
+45 pairs (18 per bucket) was too small to trust: moving a single pair shifts a reported rate by ~5-6 points, and the earlier hit-rate numbers turned out to be optimistic partly because of that. Expanded to 194 pairs across 67 topic anchors (paraphrase, near-miss, unrelated for each), spanning ten sub-domains of the fictional product instead of one narrow slice, to get a sample where single-pair luck stops dominating the result.
+
+**At this scale, manually re-reading the growing set for contamination (the process that worked, barely, at 45 pairs) stops being reliable.** Built `eval/verify_pairs.py` instead: it embeds every anchor and every `query_b` with the real model and checks each one against the *entire* anchor set, not just its own pair, catching:
+- verbatim collisions (a `query_b` identical to some stored anchor's text)
+- anchor-vs-anchor collisions (two "different" anchors that are actually the same real-world question)
+- a paraphrase whose best match across the whole set isn't its own anchor (a sign the wording is ambiguous, not that the model is wrong)
+
+**First automated pass on the 194-pair set found three real issues**, all authoring mistakes, not model failures: "reset password" and "change password" were worded closely enough to be functionally the same anchor (0.859 similarity); "I'd like to stop my plan" (meant as a paraphrase of "cancel subscription") was ambiguous enough to read as closer to "downgrade my plan"; "adjust what a collaborator is allowed to do" read as closer to "share a folder externally" than to "change permission level." Reworded each for precision, reran the checker, zero issues. This is the same debugging principle as section 6 (check the raw data, not the aggregate), just running proactively during construction instead of reactively after a bug ships.
+
+**What the larger sample actually changed, and what it didn't:**
+- **Hit rate at every threshold dropped meaningfully** (56%→40% at threshold 0.75), confirming the 45-pair number really was optimistic, not just "small but still valid." This is the concrete payoff of catching a small-sample problem before treating a number as final.
+- **The model ranking held.** Reran `bge-large` (prefixed) against the same 194 pairs specifically to check whether more data would flip the earlier verdict. It didn't: at matched safety levels, mpnet still beats it (mpnet reaches `near_miss_wrong=0.12` at threshold `0.75` with `40%` hit rate; BGE needs threshold `0.80` to reach that same safety level and only delivers `30%` hit rate there). A conclusion that survives a 4x larger, independently-verified sample is a much stronger claim than the same conclusion at 45 pairs.
+
+**Talking point:** "I didn't just build a bigger test set, I built a way to trust it, an automated check run against the same failure modes that already burned me once, and used the larger sample specifically to stress-test whether my earlier conclusion actually held up."
+
+---
+
+## 11. The final operating threshold: 0.80, chosen on an explicit asymmetric cost model
+
+The last real decision Phase 2 required: pick one threshold, on `all-mpnet-base-v2`, over the 194-pair set.
+
+**The cost model, stated explicitly rather than left implicit:** a missed cache hit costs one extra LLM call, no correctness risk. A wrong cache hit silently serves the wrong answer with full confidence, no visible failure signal. Those costs are not symmetric, so the threshold decision should weight false-positive risk (`near_miss_wrong_rate`) more heavily than raw hit rate, not split the difference evenly. This is not an assumption invented after the fact, it is the exact risk the project brief names as the reason the threshold problem exists at all.
+
+**The numbers that framed the decision:**
+
+| threshold | hit_rate | near_miss_wrong_rate |
+|---|---|---|
+| 0.70 | 0.55 | 0.21 |
+| 0.75 | 0.40 | 0.12 |
+| 0.80 | 0.22 | 0.07 |
+| 0.85 | 0.04 | 0.04 |
+
+**Chose 0.80, explicitly not 0.85.** Under a safety-weighted cost model, the instinct is to keep tightening, but that instinct has a floor: at `0.85`, hit rate collapses to `0.04`, the cache would almost never fire, which isn't "extra safe," it's "no longer functioning as a cache." The marginal safety gain from `0.80`→`0.85` (`0.07`→`0.04`) is small and not worth trading away the system's actual reason to exist. `0.80` is the point where safety is prioritized hard (93% of near-misses correctly rejected, `0.00` unrelated false positives) while the system still does its job often enough to matter.
+
+**Talking point:** "I didn't pick the safest possible threshold, I picked the safest threshold that still leaves the system doing its job, and I can point to the exact number where that tradeoff stops being worth it."
+
+---

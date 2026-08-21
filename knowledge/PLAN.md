@@ -55,7 +55,7 @@ API Gateway + Lambda in front of Bedrock, DynamoDB for cache storage, CloudWatch
 
 ## Where we are right now
 
-Starting Phase 1. Building `linear_search.py` and iterating on it directly, then documenting the finished version here before moving to Phase 2.
+Phase 1 and Phase 2 are complete. Linear search is built and tested, the eval harness is built and verified against a 194-pair test set, and the operating threshold (0.80 on all-mpnet-base-v2) is chosen and documented in `knowledge/learned.md`. Starting Phase 3 next: `src/hnsw.py`, graded against `LinearIndex` via the same harness.
 
 ## Agent usage guardrails
 
