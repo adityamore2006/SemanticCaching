@@ -79,3 +79,34 @@ Once the metric started decreasing smoothly with threshold, it *looked* healthy 
 **Root cause, once found:** ground-truth label contamination in self-authored eval data. When you write your own "should not match" examples by hand, it's easy to accidentally reuse or paraphrase content that already exists elsewhere in the set under a different label. The fix wasn't a code change at all — it was checking each new negative example against *all* existing anchor topics for semantic overlap, not just against its own paired query.
 
 ---
+
+## 8. Model comparison: a "more sophisticated" model isn't automatically better
+
+Tried four embedding configurations against the same 45-pair eval, all through the exact same harness:
+
+| model | dim | hit@0.7 | near_miss_wrong@0.7 |
+|---|---|---|---|
+| all-MiniLM-L6-v2 (baseline) | 384 | 0.61 | 0.22 |
+| all-mpnet-base-v2 | 768 | 0.67 | 0.22 |
+| BAAI/bge-large-en-v1.5, no instruction prefix | 1024 | 1.00 | 0.83 |
+| BAAI/bge-large-en-v1.5, with its recommended query prefix | 1024 | 0.78 | 0.72 |
+
+**mpnet won, and BGE lost, even though BGE is trained with hard-negative mining specifically for the "similar but different" distinction this project cares about.** Two separate lessons here:
+
+**Using a model against its documented calling convention silently breaks it.** BGE's model card specifies its instruction prefix ("Represent this sentence for searching relevant passages: ") is for the query side of an asymmetric retrieval pair. Run it unprefixed and everything, including pairs that should be obviously unrelated, gets compressed into a high, poorly-separated similarity range (`unrelated_wrong_rate` hit `1.00` at low thresholds, something that never happened with MiniLM or mpnet). Adding the prefix measurably helped, but only partially closed the gap.
+
+**A model's training objective matching your problem in theory doesn't guarantee it wins in practice.** BGE's hard-negative training was reasoned to be a better theoretical fit than mpnet's general STS objective for exactly this "near-miss" problem. Empirically, it was worse across the board, likely because BGE was tuned on large-scale web retrieval data, a different domain than short, FAQ-style, near-duplicate query pairs. The talking point: reasoning about *why* a model should help is necessary but not sufficient, run the actual eval before trusting the theory.
+
+**Talking point:** "I didn't just pick the model with the best-sounding training story, I measured four options on the actual task and let the numbers pick the winner, including a case where my own hypothesis about what should help turned out to be wrong."
+
+---
+
+## 9. Confirming the decoupling actually works, and its real limits
+
+The `Embedder(model_name)` swap was tested for real, four times, without touching `factory.py`, `linear_search.py`, or `vector_index.py` at all, just a different string. That's the interface-based decoupling from section 1 paying off in an eval context, not just a code-review nicety.
+
+**Two honest limits, worth stating precisely rather than overclaiming "fully decoupled":**
+- **Free before data is stored, not after.** Swapping the embedding model is a zero-cost config change *today*, because nothing is persisted yet. Once Phase 5 caches real query vectors, those vectors are tied to whatever model produced them (different dimensionality, different vector space). Changing models later means re-embedding everything already stored, not just flipping a config value.
+- **The threshold is tied to the model, not portable across a swap.** The whole point of section 8's table is that `0.70` means something different on every model tested. Swapping models later means rerunning the threshold sweep and re-deriving an operating threshold, the old number doesn't carry over.
+
+---
