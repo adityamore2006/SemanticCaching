@@ -73,7 +73,13 @@ class LinearIndex(VectorIndex):
 
         # vectors are already unit-normalized at insert time, so cosine
         # similarity is just the dot product here.
-        similarities = self.vectors @ query  # shape: (n,)
+        #
+        # errstate suppresses spurious divide/overflow/invalid RuntimeWarnings
+        # that Apple's Accelerate BLAS backend can raise on this matmul even
+        # when every input is a clean, non-zero, finite unit vector and the
+        # result contains no nan/inf, verified directly against this backend.
+        with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+            similarities = self.vectors @ query  # shape: (n,)
 
         k = min(k, len(self.ids))
         # argpartition for O(n) top-k selection instead of a full O(n log n)
