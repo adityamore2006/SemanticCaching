@@ -2,7 +2,7 @@
 
 ## Current status
 
-- Phase 1, Phase 2, and Phase 3 are complete. Phase 4 (formal recall@k + speed comparison at scale) is next.
+- Phase 1, Phase 2, Phase 3, and Phase 4 are complete. Phase 5 (cache routing + storage) is next.
 - The baseline implementation in src/linear_search.py is in place and validated with focused tests.
 - Scaffolding is decoupled around a shared index contract so linear search and HNSW are hot-swappable (swap happens at one factory call, nothing downstream changes).
 - The eval harness (eval/threshold_sweep.py) is built, verified against a 194-pair hand-authored test set, and has produced a documented operating threshold. Full reasoning lives in knowledge/learned.md.
@@ -22,6 +22,10 @@
 - Chose the final operating threshold (0.80 on all-mpnet-base-v2) using an explicit asymmetric cost model, safety weighted over raw hit rate, with the reasoning for why 0.80 and not stricter documented in knowledge/learned.md section 11.
 - Built HNSWIndex from scratch (src/hnsw.py): probabilistic layer assignment, greedy multi-layer descent for search, SELECT-NEIGHBORS-SIMPLE for insert-time neighbor selection. Conforms to VectorIndex, so it dropped straight into the existing contract test suite (tests/test_index_contract.py now runs all 6 invariant checks against both "linear" and "hnsw", 23/23 passing, stable across 10 repeated runs despite randomized layer assignment). Design reasoning in knowledge/learned.md section 12.
 - Validated HNSW against LinearIndex on the real 194-pair eval set (not synthetic data): 194/194 top-1 matches identical, similarity scores agreeing to 6 decimal places, and the threshold_sweep table matching the locked linear baseline exactly at every reference threshold (0.70/0.75/0.80/0.85). Caveat documented, not overclaimed: at 67 anchors this is expected since ef_search=50 sees nearly the whole graph; the real approximation/speed tradeoff is Phase 4's job once the dataset is large enough to matter.
+- Added 50 new cross-domain seed anchors (data/phase4_new_anchors.json: recipe app, fitness tracker, budgeting app) alongside the original 67, verified zero cross-anchor collisions across the combined 117 (max cross-domain similarity 0.638). Kept separate from data/eval_pairs.json so Phase 2's locked threshold decision stays untouched.
+- Built eval/scale_dataset.py: generates synthetic datasets by perturbing the 117 real anchors with calibrated Gaussian noise (sigma=0.018, empirically tuned to land parent-similarity at 0.85-0.95, matching real paraphrase pairs) instead of using unrepresentative random vectors.
+- Built eval/recall_latency.py and ran it at n=1,000/10,000/50,000: recall@1 degrades 98.0% -> 64.5% -> 54.0% as ef_search=50 becomes a shrinking fraction of the graph (expected, honestly reported); query latency crosses over between linear and HNSW between 1k and 10k, reaching HNSW 4.3x faster than linear at 50k (linear query time grew 41x over the 50x data increase, HNSW's only 2x). Full results and reasoning in knowledge/learned.md section 14.
+- Found and fixed a real O(n^2) bug in LinearIndex.insert (np.vstack reallocating the whole array every insert) that Phase 4's scale testing exposed but Phase 1/2's small-n tests never could. Fixed via lazy-cached matrix rebuild; insert time at n=50,000 dropped from 443.8s to 0.37s, full test suite unaffected (23/23 still passing). Debugging story in knowledge/learned.md section 13.
 
 ## Architectural decisions
 
@@ -31,7 +35,7 @@
 
 ## Next milestone
 
-- Begin Phase 4: formal recall@k against LinearIndex as dataset size grows, query latency comparison (linear should degrade linearly, HNSW should not), and rerunning the Phase 2 threshold sweep specifically on the approximate index to confirm the operating threshold still holds once recall isn't 100%.
+- Begin Phase 5: wire the index into real cache routing logic (hit -> return stored response, miss -> call LLM, store result). Cache storage as an in-memory dict to start.
 - Keep notes brief and evidence-backed, and avoid cloud or architecture detours until the local core is fully validated.
 
 ## Guardrail note
