@@ -3,10 +3,9 @@ Contract tests: behavior every VectorIndex implementation must satisfy.
 
 These are index-agnostic. They run through the factory so any index added
 to the registry gets held to the same guarantees the cache router and eval
-harness rely on. When HNSW lands (Phase 3), drop "hnsw" into IMPLEMENTED
-below and it inherits this whole suite for free, exact-vs-approximate
-recall differences get tested separately, but these invariants hold for
-both.
+harness rely on. Both LinearIndex and HNSWIndex are exercised here;
+exact-vs-approximate recall differences (Phase 4) are tested separately,
+but these invariants hold for both.
 """
 
 import math
@@ -15,16 +14,13 @@ import pytest
 
 from factory import create_index, available_indexes
 
-# Indexes whose insert/search actually work today. HNSW is registered but
-# still a Phase 3 stub, so it's excluded here rather than expected to pass.
-IMPLEMENTED = ["linear"]
+IMPLEMENTED = ["linear", "hnsw"]
 
 
-def test_all_registered_indexes_are_either_implemented_or_stubbed():
+def test_all_registered_indexes_are_implemented():
     # Guardrail: the registry shouldn't grow a name this suite silently
-    # ignores. Every registered kind is either exercised or a known stub.
-    known = set(IMPLEMENTED) | {"hnsw"}
-    assert set(available_indexes()) <= known
+    # ignores.
+    assert set(available_indexes()) == set(IMPLEMENTED)
 
 
 @pytest.fixture(params=IMPLEMENTED)
@@ -81,11 +77,3 @@ def test_len_tracks_inserts(index_factory):
 def test_factory_rejects_unknown_kind():
     with pytest.raises(ValueError):
         create_index("does_not_exist", dim=2)
-
-
-def test_hnsw_is_registered_but_not_yet_implemented():
-    # Documents the current state and will start failing (a useful nudge)
-    # the moment HNSW is implemented and this expectation is stale.
-    assert "hnsw" in available_indexes()
-    with pytest.raises(NotImplementedError):
-        create_index("hnsw", dim=2)
