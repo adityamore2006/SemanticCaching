@@ -270,3 +270,29 @@ The canonical comparison table, both indexes on the identical dataset, `all-mpne
 **Talking point:** "I can name the exact scale where my own from-scratch algorithm loses to brute force, and I can explain precisely why, not just where it wins. That's a more credible systems story than a chart that only shows the favorable side."
 
 ---
+
+## 18. Phase 5: cache routing, and cleaning up an inconsistency before building on top of it
+
+**Found dead code that contradicted an already-documented principle, and removed it before adding more.** Both `LinearIndex` and `HNSWIndex` had an unused `metadata` dict (`id -> payload`, added early with an "e.g. cached response" comment, never actually read or written to by anything). It would have been tempting to just repurpose it as the cache's storage layer, less new code to write. But `vector_index.py`'s own docstring and section 1 already establish, in writing, that response storage must stay independent of the index specifically so index kind and storage backend can each change without touching the other. Using the index's own dict would have quietly undone that. Removed the dead field from both classes instead of building on top of it.
+
+**`CacheStore` is a new ABC (`src/cache_store.py`), same hot-swap shape as `VectorIndex`:** `put`/`get`/`__len__`, one `InMemoryCacheStore` implementation now, `DynamoDBCacheStore` (Phase 6) implementing the identical contract against real persistence later, swapped the same way linear and HNSW already swap.
+
+**`CacheRouter` (`src/cache_router.py`) is the actual system the whole project has been building toward:** embed the query, search the index, and if similarity clears the locked `0.80` threshold (section 11), return the stored response with no LLM call; otherwise call the LLM, insert the new vector, store the response, return it fresh. Every prior phase is a component this class wires together, not a separate deliverable.
+
+**`index_kind` has no default, on purpose.** Section 17's hard numbers showed HNSW only wins on query speed once the cache has warmed up past roughly 5,000-10,000 entries -- defaulting the router to HNSW would have baked in an assumption the project's own measurements don't unconditionally support. Forcing the caller to state a choice keeps that an honest, visible decision rather than a hidden default.
+
+**The LLM call is a stub (`call_llm`), deliberately, matching the sequencing already decided in section 16.** `llm` is a constructor parameter specifically so swapping in real Bedrock later is passing a different callable, not touching the routing logic at all.
+
+**Verified end-to-end with the real embedding model, not just unit tests:**
+
+```
+MISS  sim=n/a     'How do I reset my password?'
+HIT   sim=0.8260  'I forgot my password, how do I get back into my account?'
+MISS  sim=0.0991  'Does this integrate with Slack?'
+```
+
+The paraphrase hit at `0.826`, comfortably above the locked `0.80` threshold; the unrelated query missed at `0.099`, nowhere close. Unit tests (`tests/test_cache_router.py`) use a small `FakeEmbedder` with hand-picked, exactly-computed cosine similarities (e.g. `[0.9, sqrt(1-0.9^2)]` gives exactly `0.9` similarity to `[1,0]`) instead of the real model, matching the same fast, dependency-free testing philosophy already established for the index contract tests -- real-model verification and unit-test correctness are two separate, deliberate checks, not one relied on to cover the other.
+
+**Talking point:** "Before adding a new component, I checked whether it would contradict a design decision I'd already written down and defended, found one that did, quietly, and removed it rather than build the new piece on top of an inconsistency."
+
+---
