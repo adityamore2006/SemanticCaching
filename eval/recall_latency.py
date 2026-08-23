@@ -31,7 +31,15 @@ from embedding import Embedder
 from factory import create_index
 from scale_dataset import load_seed_anchors, generate_synthetic_vectors
 
-SCALES = [1_000, 10_000, 50_000]
+SCALES = [1_000, 5_000, 10_000]
+# n=50,000 was deliberately tested once (see knowledge/learned.md sections
+# 13 and 15) as a stress test, not a realistic operating point -- a real
+# semantic cache plausibly holds hundreds to low-thousands of distinct
+# topics before saturating, and hosting cost scales with index size, so
+# 1k-10k is the range actually worth optimizing and reporting going
+# forward. The 50k run stays valuable: it's what surfaced both the O(n^2)
+# insert bug and the unrecoverable-routing recall bug, documented, not
+# discarded.
 NUM_QUERIES = 200
 RESULTS_PATH = os.path.join(os.path.dirname(__file__), "results", "phase4_scale.json")
 

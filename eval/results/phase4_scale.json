@@ -4,36 +4,36 @@
   "results": [
     {
       "n": 1000,
-      "linear_insert_s": 0.0037481670000003575,
-      "hnsw_insert_s": 1.922240167,
-      "linear_query_ms": 0.04202456000003352,
-      "hnsw_query_ms": 0.3396708699999884,
-      "recall_at_1": 0.98,
-      "num_misses": 4,
-      "avg_miss_gap": 0.29568711295723915,
-      "max_miss_gap": 0.5797962993383408
+      "linear_insert_s": 0.005360666999999708,
+      "hnsw_insert_s": 2.065996832999999,
+      "linear_query_ms": 0.054918989999963586,
+      "hnsw_query_ms": 0.37144584500002686,
+      "recall_at_1": 0.995,
+      "num_misses": 1,
+      "avg_miss_gap": 0.6174754798412323,
+      "max_miss_gap": 0.6174754798412323
+    },
+    {
+      "n": 5000,
+      "linear_insert_s": 0.01894125000000102,
+      "hnsw_insert_s": 9.158204125000001,
+      "linear_query_ms": 0.23425265500007342,
+      "hnsw_query_ms": 0.2866291700001078,
+      "recall_at_1": 0.865,
+      "num_misses": 27,
+      "avg_miss_gap": 0.2678062010694433,
+      "max_miss_gap": 0.616466298699379
     },
     {
       "n": 10000,
-      "linear_insert_s": 0.03770662499999933,
-      "hnsw_insert_s": 17.933837583000003,
-      "linear_query_ms": 0.5802433400002016,
-      "hnsw_query_ms": 0.3821041549998405,
-      "recall_at_1": 0.67,
-      "num_misses": 66,
-      "avg_miss_gap": 0.39002970560933603,
-      "max_miss_gap": 0.6498180627822876
-    },
-    {
-      "n": 50000,
-      "linear_insert_s": 0.18834570900000003,
-      "hnsw_insert_s": 95.770358875,
-      "linear_query_ms": 3.346575819999913,
-      "hnsw_query_ms": 1.0016420600000941,
-      "recall_at_1": 0.655,
-      "num_misses": 69,
-      "avg_miss_gap": 0.2680662246286005,
-      "max_miss_gap": 0.6191893815994263
+      "linear_insert_s": 0.035876542000000455,
+      "hnsw_insert_s": 16.459075915999996,
+      "linear_query_ms": 0.632010384999937,
+      "hnsw_query_ms": 0.41946955500037575,
+      "recall_at_1": 0.7,
+      "num_misses": 60,
+      "avg_miss_gap": 0.41257406026124954,
+      "max_miss_gap": 0.6584090888500214
     }
   ]
 }

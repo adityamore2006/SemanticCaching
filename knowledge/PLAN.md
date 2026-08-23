@@ -49,9 +49,11 @@ Goal: wire the index into the actual cache decision logic (hit -> return stored 
 - Cache storage: in-memory dict is fine to start, SQLite if persistence matters.
 - Swap the stubbed/local LLM for the real Bedrock call only once this is stable, deliberately, not by accident during earlier debugging.
 
-## Phase 6 (stretch, cut first if time is short): AWS wiring
+## Phase 6: AWS wiring
 
-API Gateway + Lambda in front of Bedrock, DynamoDB for cache storage, CloudWatch dashboard. Only after Phase 1-5 work locally.
+Decided architecture (see knowledge/learned.md section 16 for the cost reasoning): API Gateway (HTTP API) + Lambda + DynamoDB (on-demand billing, not provisioned) + Bedrock (called only on cache miss) + CloudWatch dashboard. Fully serverless and chosen specifically to minimize idle cost -- nothing runs, or costs anything, when it's not being called. OpenSearch Serverless is explicitly ruled out (real idle billing floor, conflicts with the economical-to-host goal); the from-scratch HNSW index runs inside Lambda itself rather than a managed vector DB.
+
+Only after Phase 5's cache-routing logic is built and validated locally -- same reasoning as linear-before-HNSW, prove the logic somewhere cheap and fast to iterate on before wiring it to live, billed AWS resources.
 
 ## Where we are right now
 
