@@ -202,3 +202,33 @@ Data: the 117 real, collision-verified anchors (see section 13's opening) pertur
 **Talking point:** "I didn't just implement HNSW and claim it's faster, I built a benchmark large enough to find the actual crossover point, and I found it in both directions, the query-speed win and the recall cost, at the same time, with the same measurement."
 
 ---
+
+## 15. Debugging story #4: 54% recall wasn't a ceiling, it was an unturned dial pointed at the wrong problem
+
+Reaction to the raw Phase 4 number (recall@1 falling to 54% at n=50,000): "that isn't good enough." Correct instinct, worth trusting instead of explaining away -- but the fix wasn't obvious, and the first hypothesis turned out wrong, which is the more useful part of this story.
+
+**First hypothesis (reasonable, wrong): `ef_search` is too narrow, widen it.** `ef_search` is the standard operational knob real HNSW deployments scale up alongside data specifically to hold a target recall, and it was fixed at the paper's default (50) throughout Phase 4 on purpose, to isolate how recall decays as `n` grows relative to an unchanged beam. So the natural next move was sweeping it. Since `ef_search` is a pure query-time parameter (doesn't touch graph structure), the n=50,000 graph only needed to be built once and reused across the sweep.
+
+**Result: flat.** `ef=50 -> recall 0.650`, `ef=1600` (32x wider) `-> recall 0.655`. Query latency roughly doubled for that 32x wider beam and recall barely moved. This ruled out "beam too narrow" as the cause -- a real result worth reporting exactly as measured, not massaged into agreeing with the hypothesis.
+
+**Second hypothesis, built from the first result, not assumed: the problem is upstream of the beam entirely.** `ef_search` only controls the final wide search at layer 0. Getting there requires a single-path, zero-backtracking greedy walk through the upper layers (`ef=1`, exactly as the paper's own K-NN-SEARCH algorithm specifies -- not an implementation bug). If that walk commits to the wrong neighborhood on one bad hop, no amount of widening the *final* beam recovers it, because `ef_search` never touches that walk at all.
+
+**Verified before fixing anything:** for each of the 87 misses (n=50,000, `ef_search=50`), checked whether HNSW's wrong answer shared the same parent anchor as the true match (harmless -- same underlying topic, different near-duplicate sibling) or a genuinely different one. **60.9% were a different anchor entirely** -- not close calls between similar siblings, real wrong answers. Combined with the flat `ef_search` curve, this confirmed the upper-layer routing, not beam width, was the actual bottleneck.
+
+**The fix:** added `ef_upper` (default 8, not from the paper), replacing the strict `ef=1` upper-layer descent in both `insert()`'s phase A and `search()` with a small beam -- enough width to consider a few alternatives at each upper layer instead of committing to one path outright. Applied to both call sites, not just `search()`, since insert's phase A has the identical structural weakness and a badly-routed insert wires a new node into the wrong part of the graph in the first place, compounding the problem for every future query.
+
+**Re-verified, not assumed fixed, at every scale:**
+
+| n | recall@1 before | recall@1 after | hnsw query before | hnsw query after |
+|---|---|---|---|---|
+| 1,000 | 98.0% | 98.0% (already near ceiling) | 0.541ms | 0.340ms |
+| 10,000 | 64.5% | 67.0% | 0.577ms | 0.382ms |
+| 50,000 | 54.0% | **65.5%** | 1.083ms | 1.002ms |
+
+Also re-ran the exact 194-real-pair Phase 3 correctness check (small n, where routing failures are rare regardless) to confirm the change didn't regress anything there: still 194/194 exact agreement with linear search. And re-checked the miss composition at n=50,000: the "genuinely wrong cluster" rate (the number that actually matters for cache correctness, not the stricter "exact same id" recall metric) dropped from 26.5% of all queries to 18.0%.
+
+**Honest framing, not declared "solved":** the fix produced a real, evidence-backed improvement, largest exactly where it mattered most (the largest, most stressed graph), at no query-latency cost. It did not fully close the gap -- 65.5% recall@1 (18% still landing in a genuinely wrong cluster) at n=50,000 is better, not production-ready. Untried next levers: sweeping `ef_upper` itself (only tested at one value, 8), or combining with a higher `M` for denser upper-layer connectivity.
+
+**Talking point:** "The first fix I reached for was wrong, and I know that because I measured it before assuming it worked, a flat recall curve across a 32x wider beam. That result is what pointed me at the actual bottleneck, upper-layer routing with no backtracking, which I confirmed with a targeted diagnostic before touching any code, then re-measured after the fix at every scale, not just the one that looked worst."
+
+---
