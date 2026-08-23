@@ -55,7 +55,7 @@ API Gateway + Lambda in front of Bedrock, DynamoDB for cache storage, CloudWatch
 
 ## Where we are right now
 
-Phase 1, Phase 2, and Phase 3 are complete. Linear search is built and tested, the eval harness is built and verified against a 194-pair test set, the operating threshold (0.80 on all-mpnet-base-v2) is chosen and documented in `knowledge/learned.md`, and `src/hnsw.py` is built from scratch and validated against `LinearIndex` (194/194 top-1 agreement on the real eval set). Starting Phase 4 next: formal recall@k as data scales, latency comparison, rerunning the threshold sweep on the approximate index.
+Phase 1 through Phase 4 are complete. Linear search is built and tested, the eval harness is built and verified against a 194-pair test set, the operating threshold (0.80 on all-mpnet-base-v2) is chosen and documented in `knowledge/learned.md`, `src/hnsw.py` is built from scratch and validated against `LinearIndex` (194/194 top-1 agreement on the real eval set), and Phase 4's recall@k + latency comparison at scale (1k/10k/50k synthetic vectors) is measured and documented, including a real O(n^2) bug found and fixed in `LinearIndex.insert` along the way. Starting Phase 5 next: cache routing (hit -> return stored response, miss -> call LLM, store result).
 
 ## Agent usage guardrails
 

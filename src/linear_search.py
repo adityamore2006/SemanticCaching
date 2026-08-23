@@ -32,8 +32,14 @@ class LinearIndex(VectorIndex):
 
     def __init__(self, dim):
         super().__init__(dim)
-        self.ids = []              # ids[i] corresponds to vectors[i]
-        self.vectors = np.empty((0, dim), dtype=np.float32)
+        self.ids = []              # ids[i] corresponds to _vectors[i]
+        self._vectors = []         # list of normalized 1-D float32 arrays
+        # Lazily rebuilt into one contiguous matrix on first search() after
+        # an insert, then reused until the next insert invalidates it.
+        # Rebuilding eagerly on every insert (np.vstack-ing the whole array
+        # each time) is what used to make bulk-loading n vectors O(n^2)
+        # instead of O(n) -- see knowledge/learned.md.
+        self._matrix_cache = None
         self.metadata = {}         # id -> arbitrary payload (e.g. cached response)
 
     def _normalize(self, vector):
@@ -52,10 +58,18 @@ class LinearIndex(VectorIndex):
         callers that need upsert semantics should check first.
         """
         normalized = self._normalize(vector)
-        self.vectors = np.vstack([self.vectors, normalized])
+        self._vectors.append(normalized)
         self.ids.append(id)
+        self._matrix_cache = None
         if metadata is not None:
             self.metadata[id] = metadata
+
+    def _matrix(self):
+        if self._matrix_cache is None:
+            self._matrix_cache = (
+                np.stack(self._vectors) if self._vectors else np.empty((0, self.dim), dtype=np.float32)
+            )
+        return self._matrix_cache
 
     def search(self, query_vector, k=1):
         """
@@ -79,7 +93,7 @@ class LinearIndex(VectorIndex):
         # when every input is a clean, non-zero, finite unit vector and the
         # result contains no nan/inf, verified directly against this backend.
         with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-            similarities = self.vectors @ query  # shape: (n,)
+            similarities = self._matrix() @ query  # shape: (n,)
 
         k = min(k, len(self.ids))
         # argpartition for O(n) top-k selection instead of a full O(n log n)

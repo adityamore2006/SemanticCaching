@@ -166,3 +166,39 @@ The last real decision Phase 2 required: pick one threshold, on `all-mpnet-base-
 **Talking point:** "I can point to the exact line where my implementation deviates from the paper's default (simple vs. heuristic neighbor selection), explain why, and I validated correctness before ever measuring speed, because a fast wrong answer isn't a result."
 
 ---
+
+## 13. Debugging story #3: an O(n^2) bug that only 194 real pairs could never expose
+
+Phase 4 needed far more data than 194 hand-authored pairs to actually see HNSW's approximation and speed tradeoffs, so the plan was: perturb the 117 real, verified anchors (67 from Phase 2 + 50 new cross-domain ones added specifically to widen embedding-space coverage, see section 14) with small calibrated Gaussian noise, scale to 1,000 / 10,000 / 50,000 synthetic vectors, and measure recall@1 and query latency for both indexes as `n` grows.
+
+**Symptom:** `LinearIndex`'s insert time didn't scale like brute-force insert should. `n=1,000 -> 0.13s`, `n=10,000 -> 21.45s` (a 160x jump for a 10x data increase), and the full run's `n=50,000` tier finished at **443.8 seconds** for insert alone -- longer than HNSW's insert at the same scale, which makes no sense for an operation that should just be "append to a list."
+
+**Root cause:** `LinearIndex.insert` did `self.vectors = np.vstack([self.vectors, normalized])` on every single call -- reallocating and copying the *entire* array from scratch each time, making one insert `O(n)` and `n` inserts `O(n^2)` overall. This bug existed since Phase 1 and was invisible there: Phase 1's correctness tests use a handful of hand-picked vectors, and Phase 2's eval only ever builds an index of 67 unique anchors. `O(n^2)` is indistinguishable from `O(n)` at `n=67`; it only becomes visible once `n` is large enough for the squared term to dominate, which nothing before Phase 4 ever exercised.
+
+**The fix:** accumulate inserted vectors in a plain Python list (`_vectors`, true O(1) amortized append, same trick Python's own list uses internally), and only materialize the contiguous numpy matrix `search()` actually needs lazily, cached, and invalidated on the next insert. This doesn't change what gets computed, just when: `n` inserts now cost `O(n)` total instead of `O(n^2)`, and the one-time matrix rebuild before the next search is `O(n)`, same as it always should have been.
+
+**Verified, not assumed fixed:** re-timed inserting the same three scales after the fix -- `n=1,000: 0.13s -> 0.006s`, `n=10,000: 21.45s -> 0.064s`, `n=50,000: 443.8s -> 0.37s`. Full test suite (23/23) still passes unchanged, confirming the fix altered performance, not behavior.
+
+**Talking point:** "This is the same lesson as the eval-data contamination bugs, just on the systems side instead of the measurement side: a correctness test suite built at small scale can't catch a complexity bug, because small `n` can't distinguish `O(n)` from `O(n^2)`. The fix wasn't intuition, it was building a benchmark large enough that the bug became visible, then re-measuring to prove the fix actually worked instead of assuming it did."
+
+---
+
+## 14. Phase 4 results: the recall/speed tradeoff, measured, not asserted
+
+Data: the 117 real, collision-verified anchors (see section 13's opening) perturbed with `sigma=0.018` Gaussian noise (empirically calibrated against a real embedding, landing parent-similarity at `0.85-0.95`, matching where genuine Phase 2 paraphrases sit) into synthetic datasets of 1,000 / 10,000 / 50,000 vectors. Both indexes built on the identical dataset at each scale; 200 held-out queries (fresh perturbations of the same 117 anchors, never inserted) measured against both.
+
+| n | linear query | hnsw query | recall@1 | hnsw insert | linear insert |
+|---|---|---|---|---|---|
+| 1,000 | 0.112ms | 0.541ms | 98.0% | 3.56s | 0.01s |
+| 10,000 | 1.070ms | 0.577ms | 64.5% | 23.04s | 0.09s |
+| 50,000 | 4.617ms | 1.083ms | 54.0% | 113.60s | 0.32s |
+
+**The query-latency crossover is real and empirically located, not assumed.** Before measuring, the honest expectation (see section 12/dataset-planning discussion) was that our from-scratch HNSW is pure Python (heapq, dict lookups) competing against `LinearIndex`'s single vectorized numpy matmul, so the scale where HNSW's better asymptotic complexity actually overcomes numpy's raw constant-factor speed was a genuine unknown. The data answers it: brute force wins below ~a few thousand vectors, HNSW wins above that, and the gap widens fast -- by 50,000, linear's query time grew 41x over the 50x data increase (consistent with real `O(n)`), while HNSW's grew only 2x (real sub-linear growth).
+
+**Recall degrades exactly as predicted once `ef_search` stops covering most of the graph, and it's reported honestly, not softened.** With `ef_search` fixed at the paper's default `50`, recall@1 fell 98.0% -> 64.5% -> 54.0% as `n` grew. At 50,000 vectors, `ef=50` is a genuinely small slice (0.1%) of the graph, and HNSW gets the wrong top-1 answer nearly half the time under unmodified default parameters. This isn't a flaw to hide, it's the actual tradeoff the whole project exists to make legible: the fix, not yet built, would be growing `ef_search` alongside `n` to hold a target recall, which is exactly the kind of operational knob a real deployment would tune.
+
+**One more asymmetry worth naming out loud: HNSW trades a much more expensive build for a much cheaper query.** `113.6s` to insert 50,000 vectors into the graph vs. `0.32s` for linear's (now-fixed) insert. That's the right trade specifically *for a cache*: queries vastly outnumber inserts (cache misses) once the system is warmed up, so paying more at insert time to make every subsequent query faster is the correct shape of tradeoff for this exact use case, not a universal win for HNSW over brute force in general.
+
+**Talking point:** "I didn't just implement HNSW and claim it's faster, I built a benchmark large enough to find the actual crossover point, and I found it in both directions, the query-speed win and the recall cost, at the same time, with the same measurement."
+
+---
