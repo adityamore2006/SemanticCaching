@@ -26,7 +26,8 @@
 - Built eval/scale_dataset.py: generates synthetic datasets by perturbing the 117 real anchors with calibrated Gaussian noise (sigma=0.018, empirically tuned to land parent-similarity at 0.85-0.95, matching real paraphrase pairs) instead of using unrepresentative random vectors.
 - Built eval/recall_latency.py and ran it at n=1,000/10,000/50,000: recall@1 degrades 98.0% -> 64.5% -> 54.0% as ef_search=50 becomes a shrinking fraction of the graph (expected, honestly reported); query latency crosses over between linear and HNSW between 1k and 10k, reaching HNSW 4.3x faster than linear at 50k (linear query time grew 41x over the 50x data increase, HNSW's only 2x). Full results and reasoning in knowledge/learned.md section 14.
 - Found and fixed a real O(n^2) bug in LinearIndex.insert (np.vstack reallocating the whole array every insert) that Phase 4's scale testing exposed but Phase 1/2's small-n tests never could. Fixed via lazy-cached matrix rebuild; insert time at n=50,000 dropped from 443.8s to 0.37s, full test suite unaffected (23/23 still passing).
-- Diagnosed and fixed a real HNSW recall problem at n=50,000: an ef_search sweep (50->1600) showed recall flat, ruling out "beam too narrow"; a targeted diagnostic then showed 60.9% of misses landed in a completely different anchor cluster, pointing at unrecoverable greedy routing through the upper layers (ef=1, per the paper's own algorithm) as the real bottleneck. Added ef_upper (default 8, a deliberate deviation from the paper) to both insert's phase A and search()'s upper-layer descent. Recall@1 at n=50,000 improved 54.0% -> 65.5% with no latency regression (still ~3.3x faster than linear); re-verified small-scale exact correctness still holds (194/194). Full investigation in knowledge/learned.md section 15. Debugging story in knowledge/learned.md section 13.
+- Diagnosed and fixed a real HNSW recall problem at n=50,000: an ef_search sweep (50->1600) showed recall flat, ruling out "beam too narrow"; a targeted diagnostic then showed 60.9% of misses landed in a completely different anchor cluster, pointing at unrecoverable greedy routing through the upper layers (ef=1, per the paper's own algorithm) as the real bottleneck. Added ef_upper (default 8, a deliberate deviation from the paper) to both insert's phase A and search()'s upper-layer descent. Recall@1 at n=50,000 improved 54.0% -> 65.5% with no latency regression (still ~3.3x faster than linear); re-verified small-scale exact correctness still holds (194/194). Full investigation in knowledge/learned.md section 15.
+- Re-scoped the benchmark's realistic operating range to 1k-10k (down from 50k), matching what a real cache and real hosting costs actually look like; n=50,000 stays documented as the stress test that found the O(n^2) and routing bugs, not the ongoing target scale. Chose a fully serverless AWS architecture for the eventual deployment (API Gateway + Lambda + DynamoDB on-demand + Bedrock + CloudWatch), explicitly avoiding OpenSearch Serverless due to its non-trivial idle billing floor. Full reasoning and the canonical linear-vs-HNSW comparison table in knowledge/learned.md sections 16-17. Debugging story in knowledge/learned.md section 13.
 
 ## Architectural decisions
 
@@ -36,8 +37,8 @@
 
 ## Next milestone
 
-- Begin Phase 5: wire the index into real cache routing logic (hit -> return stored response, miss -> call LLM, store result). Cache storage as an in-memory dict to start.
-- Keep notes brief and evidence-backed, and avoid cloud or architecture detours until the local core is fully validated.
+- Begin Phase 5: wire the index into real cache routing logic (hit -> return stored response, miss -> call LLM, store result), built and validated locally first, before wrapping for Lambda deployment (see knowledge/learned.md section 16 for why local-first still applies even though the eventual target is AWS).
+- Keep notes brief and evidence-backed.
 
 ## Guardrail note
 

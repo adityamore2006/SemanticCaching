@@ -232,3 +232,41 @@ Also re-ran the exact 194-real-pair Phase 3 correctness check (small n, where ro
 **Talking point:** "The first fix I reached for was wrong, and I know that because I measured it before assuming it worked, a flat recall curve across a 32x wider beam. That result is what pointed me at the actual bottleneck, upper-layer routing with no backtracking, which I confirmed with a targeted diagnostic before touching any code, then re-measured after the fix at every scale, not just the one that looked worst."
 
 ---
+
+## 16. Right-sizing the benchmark, and the AWS architecture decision
+
+Two decisions made together, because they're the same underlying constraint viewed from two angles.
+
+**Capped the realistic benchmark scale at 1k-10k, deliberately walked back from n=50,000.** 50,000 distinct previously-cached topics isn't a realistic size for most real semantic caches (the same GPTCache-precedent scale cited in the project brief operates on the order of hundreds to low-thousands of distinct topics before saturating), and on real infrastructure, hosting cost scales directly with index size. This isn't discarding the 50k work, it's re-scoping what it's *for*: the 50k stress test already earned its keep, it's what surfaced both the O(n^2) insert bug (section 13) and the unrecoverable-routing recall bug (section 15). Neither of those would have shown up at 10k. But going forward, 1k-10k is the range worth optimizing and reporting as "the" performance story, since it's the range that's actually economical to run in production.
+
+**AWS architecture: fully serverless, chosen specifically to minimize idle cost, not for novelty.** API Gateway (HTTP API, the cheaper tier) -> Lambda -> DynamoDB (on-demand billing, not provisioned) -> Bedrock (pay per token, called only on cache miss) -> CloudWatch. Every piece of this is pay-per-request; nothing runs, or costs anything, when nobody's calling it. The Bedrock-only-on-miss piece is the project's actual cost-savings claim made literal: every cache hit is a Bedrock call that provably didn't happen, and CloudWatch can turn that into a real dollar figure over time, not an estimate.
+
+**Explicitly ruled out: OpenSearch Serverless**, despite the project brief listing "compare from-scratch HNSW against OpenSearch Serverless" as an optional stretch idea. It carries a real minimum OCU-hour billing floor even sitting idle, which directly contradicts the economical-to-host goal. If that comparison ever happens, it'd be a one-time, immediately-torn-down exercise, not something left running alongside the rest of the stack.
+
+**The two decisions reinforce each other, worth stating explicitly:** a small, realistic cache (decision 1) is also what makes a Lambda-native architecture viable at all (decision 2) -- a small HNSW graph is cheap to rebuild from scratch on a cold start (n=1,000 built in ~2 seconds, section 15's benchmark), so there's no need for an always-on server just to keep a large graph warm in memory. Choosing realistic data size and choosing serverless infrastructure aren't two separate cost-cutting moves, they're the same insight applied twice.
+
+**Sequencing principle for Phase 5/6, carried over from the linear-before-HNSW pattern:** build and validate the cache-routing logic (hit -> return stored response, miss -> call Bedrock, store result) locally first, fast and free to iterate on, then wrap it for Lambda deployment once it's proven -- not developing the routing logic directly against live, billed AWS resources.
+
+**Talking point:** "The cost-consciousness wasn't an afterthought bolted onto the architecture, it came from the same realism check that shaped the benchmark itself: a cache doesn't need 50,000 entries to prove its value, and neither does the hosting bill."
+
+---
+
+## 17. Linear vs HNSW: head-to-head, hard metrics (1k-10k, post-fix)
+
+The canonical comparison table, both indexes on the identical dataset, `all-mpnet-base-v2`, `ef_upper=8`:
+
+| n | linear query | hnsw query | recall@1 | hnsw insert | linear insert |
+|---|---|---|---|---|---|
+| 1,000 | 0.055ms | 0.371ms | 99.5% | 2.07s | 0.01s |
+| 5,000 | 0.234ms | 0.287ms | 86.5% | 9.16s | 0.02s |
+| 10,000 | 0.632ms | 0.419ms | 70.0% | 16.46s | 0.04s |
+
+**Honest counterpoint first, worth leading with rather than burying: at n=1,000, brute force wins outright.** Linear is faster per query (0.055ms vs 0.371ms) *and* effectively exact (99.5% recall). HNSW's whole reason to exist doesn't show up yet at this size -- a real deployment starting from an empty cache would spend real time in the regime where the from-scratch algorithm work isn't paying for itself yet.
+
+**The crossover is real and lands in the low-to-mid thousands, not a single fixed n.** Linear still edges out HNSW at n=5,000 (0.234ms vs 0.287ms) but loses by n=10,000 (0.632ms vs 0.419ms, HNSW 1.5x faster). Consistent with the earlier 50k-scale run, where the same crossover showed up between 1k and 10k -- the exact n shifts slightly run to run (layer assignment is randomized, not seeded), but the *location* of the crossover, low thousands, is consistent across independent runs.
+
+**The tradeoff being bought, stated as a trade, not a win:** HNSW's insert cost grows real and fast across this range (2.07s -> 16.46s, an 8x increase for a 10x data increase) against linear's now-fixed, near-instant insert (0.01s -> 0.04s). Recall correspondingly degrades (99.5% -> 70.0%) as the fixed-width search has more graph to cover. HNSW is not a strictly-better replacement for linear search in this system, it's a deliberate trade: slower, more expensive graph construction and a real (measured, not hidden) recall cost, in exchange for faster queries once the dataset is large enough for that to matter -- which is exactly the right trade for a cache, where queries vastly outnumber inserts once warmed up (section 14).
+
+**Talking point:** "I can name the exact scale where my own from-scratch algorithm loses to brute force, and I can explain precisely why, not just where it wins. That's a more credible systems story than a chart that only shows the favorable side."
+
+---
