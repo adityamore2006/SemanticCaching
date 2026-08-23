@@ -296,3 +296,31 @@ The paraphrase hit at `0.826`, comfortably above the locked `0.80` threshold; th
 **Talking point:** "Before adding a new component, I checked whether it would contradict a design decision I'd already written down and defended, found one that did, quietly, and removed it rather than build the new piece on top of an inconsistency."
 
 ---
+
+## 19. Phase 6 design, decided but not yet built: the stateless-Lambda-vs-stateful-graph problem
+
+**The problem, and why it's not obvious from the code as it stands:** `CacheRouter`'s vector index and `CacheStore` both currently live in plain Python memory. That's correct for a long-running local process, but Lambda containers are stateless between invocations and can be recycled at any time. Deploying the current code as-is would silently lose the entire cache -- both the graph and every stored response -- on every cold start, making the system nonfunctional in production (every query would miss forever, since nothing would ever persist). `CacheStore` was already designed to be swappable specifically for this (`DynamoDBCacheStore` was always the planned Phase 6 piece), but the vector index itself has no equivalent persistence story yet.
+
+**Three options considered:**
+1. **Rebuild the graph from DynamoDB on every cold start**, keep it in memory for that container's lifetime. Reuses `insert()` exactly as it already exists, no new serialization code.
+2. **Serialize the built graph to S3**, reload (deserialize, not rebuild) on cold start. Faster cold starts than rebuilding, but adds real complexity: something has to decide when to re-persist the graph after every insert-on-miss, and concurrent Lambda invocations updating it introduce a real consistency question that doesn't exist with option 1.
+3. **Provisioned concurrency**, pay AWS to keep at least one container permanently warm so the in-memory graph effectively never gets discarded.
+
+**Decided: option 1, rebuild-from-DynamoDB-on-cold-start.** Chosen for the same reason linear-before-HNSW and simple-before-heuristic-neighbor-selection were chosen earlier in this project: it's the simplest thing that actually works, reuses code that's already built and tested, and only pays for added complexity (option 2) if measurement later proves it's actually needed. It also directly cashes in the section 16 decision to cap realistic scale at 1k-10k -- that's exactly what makes a full rebuild cheap enough to do on every cold start in the first place.
+
+**Explicitly rejected: provisioned concurrency (option 3).** It's a standing, 24/7 cost for reserved compute capacity, not pay-per-use -- roughly $10+/month just to hold a container open, before any real traffic. That directly contradicts the near-zero-idle-cost serverless architecture already committed to in section 16, for the same reason OpenSearch Serverless was ruled out there.
+
+**Cost estimate for the chosen approach** (ballpark, not quoted AWS pricing -- worth checking the Pricing Calculator before trusting a real bill, but the order of magnitude holds), at a realistic demo/portfolio traffic level of 100 cold starts/month, each rebuilding a 10,000-entry graph:
+- Lambda compute: 100 x 16.5s (the actual measured HNSW insert time at n=10,000, section 17) x 1GB = 1,650 GB-seconds -- inside AWS's perpetual 400,000 GB-second/month free tier, effectively $0.
+- DynamoDB reads for the rebuild: 100 x 10,000 reads = 1,000,000 read-request-units, roughly $0.25 total at on-demand pricing.
+- Realistic total: **$0-1/month** at this usage level.
+
+**The honest cost that isn't in dollars: cold-start latency.** Rebuilding a 10,000-entry graph takes ~16.5 seconds, a real, one-time penalty per cold container, not something to hide behind the cheap dollar figure. Worth measuring once this is actually built, and worth treating graph-serialization-to-S3 (option 2) as the documented next optimization if that latency turns out to be a real problem in practice -- not something to build preemptively without that evidence.
+
+**Reaffirmed, not a new decision: `LinearIndex` never gets deployed.** `CacheRouter`'s `index_kind` has no default specifically so this stays an explicit, visible choice (section 18) -- the Lambda handler will always construct it with `"hnsw"`. Linear search stays exactly what it's always been in this project: the local ground-truth tool HNSW gets graded against, never a production component.
+
+**Status: design decided and documented, implementation deliberately deferred to its own session.** Local tooling is ready (`aws-cli` 2.36.29 and SAM CLI 1.165.0 already installed via Homebrew), but AWS credentials are not yet configured locally (`aws configure` still needs to be run, directly by the user in their own terminal, never through an assistant's tool calls, so access keys never pass through a transcript). Concrete next build artifacts, in order: `DynamoDBCacheStore` (implementing the existing `CacheStore` contract), a Lambda handler wrapping `CacheRouter` with the cold-start rebuild logic described above, then the SAM template (API Gateway + Lambda + DynamoDB) to actually deploy it.
+
+**Talking point:** "I designed the persistence strategy around a constraint I'd already measured, not a general best practice, the rebuild is only cheap because I'd already capped the realistic scale at 1k-10k earlier for cost reasons. The two decisions weren't made independently, the second one only works because of the first."
+
+---
