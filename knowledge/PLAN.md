@@ -57,7 +57,7 @@ Only after Phase 5's cache-routing logic is built and validated locally -- same 
 
 ## Where we are right now
 
-Phase 1 through Phase 4 are complete. Linear search is built and tested, the eval harness is built and verified against a 194-pair test set, the operating threshold (0.80 on all-mpnet-base-v2) is chosen and documented in `knowledge/learned.md`, `src/hnsw.py` is built from scratch and validated against `LinearIndex` (194/194 top-1 agreement on the real eval set), and Phase 4's recall@k + latency comparison at scale (1k/10k/50k synthetic vectors) is measured and documented, including a real O(n^2) bug found and fixed in `LinearIndex.insert` along the way. Starting Phase 5 next: cache routing (hit -> return stored response, miss -> call LLM, store result).
+Phase 1 through Phase 5 are complete. Linear search and HNSW are both built, tested, and benchmarked against each other (recall@k + latency across a realistic 1k-10k scale, see `knowledge/learned.md` sections 14-17), with two real bugs found and fixed along the way (an O(n^2) insert bug in `LinearIndex`, an unrecoverable upper-layer routing bug in `HNSWIndex`). `src/cache_router.py` now wires embedding, index, and cache storage into the actual hit/miss decision, with a stubbed LLM call, verified end-to-end with the real embedding model (see `knowledge/learned.md` section 18). Starting Phase 6 next: wrap `CacheRouter` for the decided serverless AWS architecture.
 
 ## Agent usage guardrails
 

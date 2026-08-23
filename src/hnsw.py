@@ -82,7 +82,6 @@ class HNSWIndex(VectorIndex):
         # bug, not a valid empty-result case, so no .get() defaulting here.
         self.neighbors: Dict[Hashable, Dict[int, List[Hashable]]] = {}
         self.levels: Dict[Hashable, int] = {}
-        self.metadata: Dict[Hashable, object] = {}
 
         self.entry_point: Hashable = None
         self.max_level: int = -1
@@ -166,15 +165,13 @@ class HNSWIndex(VectorIndex):
         scored.sort(key=lambda pair: -pair[0])
         self.neighbors[node_id][layer] = [nid for _, nid in scored[:cap]]
 
-    def insert(self, id: Hashable, vector: Sequence[float], metadata=None) -> None:
+    def insert(self, id: Hashable, vector: Sequence[float]) -> None:
         normalized = self._normalize(vector)
         level = self._random_level()
 
         self.vectors[id] = normalized
         self.levels[id] = level
         self.neighbors[id] = {l: [] for l in range(level + 1)}
-        if metadata is not None:
-            self.metadata[id] = metadata
 
         if self.entry_point is None:
             self.entry_point = id

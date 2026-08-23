@@ -40,7 +40,6 @@ class LinearIndex(VectorIndex):
         # each time) is what used to make bulk-loading n vectors O(n^2)
         # instead of O(n) -- see knowledge/learned.md.
         self._matrix_cache = None
-        self.metadata = {}         # id -> arbitrary payload (e.g. cached response)
 
     def _normalize(self, vector):
         vector = np.asarray(vector, dtype=np.float32)
@@ -51,7 +50,7 @@ class LinearIndex(VectorIndex):
             raise ValueError("cannot normalize a zero vector")
         return vector / norm
 
-    def insert(self, id, vector, metadata=None):
+    def insert(self, id, vector):
         """
         Add a vector to the index under the given id. If the id already
         exists, this appends a duplicate entry rather than overwriting,
@@ -61,8 +60,6 @@ class LinearIndex(VectorIndex):
         self._vectors.append(normalized)
         self.ids.append(id)
         self._matrix_cache = None
-        if metadata is not None:
-            self.metadata[id] = metadata
 
     def _matrix(self):
         if self._matrix_cache is None:
