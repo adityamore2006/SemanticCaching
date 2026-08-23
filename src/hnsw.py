@@ -22,6 +22,19 @@ reasoning trail):
     the paper's Algorithm 1 default, unconditional -- layer 0 is the only
     layer guaranteed to hold every node, so it carries more of the graph's
     actual connectivity and gets a bigger budget for it.
+  - Upper-layer descent uses a small beam (ef_upper), NOT the paper's
+    strict ef=1. This is a deliberate deviation, added after Phase 4 scale
+    testing (n=50,000) diagnosed a real problem the paper's default
+    doesn't warn about: a single-path, no-backtracking greedy walk through
+    the upper layers can commit to the wrong neighborhood before the wide
+    ef_search beam at layer 0 ever runs, and no amount of widening that
+    final beam recovers from a bad entry point -- confirmed empirically,
+    an ef_search sweep from 50 to 1600 barely moved recall (65.0% ->
+    65.5%), while checking where the misses actually landed showed 61% of
+    them in a completely different anchor cluster than the true answer,
+    not just a different near-duplicate of the right one. ef_upper gives
+    the walk a few alternatives to consider at each upper layer instead of
+    committing to one path outright. See knowledge/learned.md section 15.
 
 Similarity metric: cosine similarity, same as LinearIndex. Vectors are
 normalized to unit length on insert, so "distance" and "similarity" rank
@@ -50,12 +63,17 @@ class HNSWIndex(VectorIndex):
     uses it (with ef_search) to find the query's actual nearest neighbors.
     """
 
-    def __init__(self, dim: int, M: int = 16, ef_construction: int = 200, ef_search: int = 50):
+    def __init__(self, dim: int, M: int = 16, ef_construction: int = 200, ef_search: int = 50, ef_upper: int = 8):
         super().__init__(dim)
         self.M = M
         self.M_max0 = 2 * M
         self.ef_construction = ef_construction
         self.ef_search = ef_search
+        # Not from the paper -- see the module docstring's "Upper-layer
+        # descent" note. Small on purpose: upper layers are sparse (see
+        # the layer-assignment note above), so widening the walk there is
+        # cheap even though ef_construction/ef_search are much larger.
+        self.ef_upper = ef_upper
         self.mL = 1.0 / math.log(M)
 
         self.vectors: Dict[Hashable, np.ndarray] = {}
@@ -166,12 +184,14 @@ class HNSWIndex(VectorIndex):
         entry = self.entry_point
 
         # Phase A: descend from the current top layer down to one above
-        # where the new node lives, keeping only the single best entry
-        # point at each layer (ef=1). These upper layers are sparse
-        # highways -- all we need from them is a good jumping-off point
-        # for phase B, not a thorough search.
+        # where the new node lives, keeping a small beam (ef_upper) of
+        # candidates at each layer instead of committing to a single path.
+        # These upper layers are sparse highways -- all we need from them
+        # is a good jumping-off point for phase B, not a thorough search,
+        # but a pure ef=1 walk has zero backtracking and can commit to the
+        # wrong neighborhood on one bad hop (see module docstring).
         for layer in range(self.max_level, level, -1):
-            entry = self._search_layer(normalized, [entry], ef=1, layer=layer)[0][0]
+            entry = self._search_layer(normalized, [entry], ef=self.ef_upper, layer=layer)[0][0]
 
         # Phase B: from min(max_level, level) down to layer 0, actually
         # find candidate neighbors and wire the new node into the graph.
@@ -204,11 +224,13 @@ class HNSWIndex(VectorIndex):
         query = self._normalize(query_vector)
         entry = self.entry_point
 
-        # Greedy single-path descent through the upper layers, same as
-        # insert's phase A: find a good entry point for the real search
-        # without paying for a wide beam until we're at the bottom.
+        # Small-beam descent through the upper layers, same as insert's
+        # phase A: find a good entry point for the real search without
+        # paying for a wide beam until we're at the bottom, but with
+        # enough width (ef_upper) to backtrack away from one bad hop
+        # instead of committing to a single path (see module docstring).
         for layer in range(self.max_level, 0, -1):
-            entry = self._search_layer(query, [entry], ef=1, layer=layer)[0][0]
+            entry = self._search_layer(query, [entry], ef=self.ef_upper, layer=layer)[0][0]
 
         ef = max(self.ef_search, k)
         found = self._search_layer(query, [entry], ef=ef, layer=0)

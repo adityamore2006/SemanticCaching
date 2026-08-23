@@ -1,0 +1,37 @@
+{
+  "n": 50000,
+  "num_queries": 200,
+  "linear_query_ms": 3.5222318149994436,
+  "results": [
+    {
+      "ef_search": 50,
+      "recall_at_1": 0.65,
+      "hnsw_query_ms": 0.8045660250002129
+    },
+    {
+      "ef_search": 100,
+      "recall_at_1": 0.655,
+      "hnsw_query_ms": 0.9407653999996768
+    },
+    {
+      "ef_search": 200,
+      "recall_at_1": 0.655,
+      "hnsw_query_ms": 1.1305885049993947
+    },
+    {
+      "ef_search": 400,
+      "recall_at_1": 0.655,
+      "hnsw_query_ms": 1.3878597949999971
+    },
+    {
+      "ef_search": 800,
+      "recall_at_1": 0.655,
+      "hnsw_query_ms": 1.465679139999807
+    },
+    {
+      "ef_search": 1600,
+      "recall_at_1": 0.655,
+      "hnsw_query_ms": 1.373611864999944
+    }
+  ]
+}
