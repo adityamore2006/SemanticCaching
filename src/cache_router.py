@@ -97,7 +97,7 @@ class CacheRouter:
         return RouteResult(response=response, hit=False, matched_id=matched_id, similarity=similarity)
 
 
-if __name__ == "__main__":
+def _run_fixed_demo():
     # Runnable end-to-end demo with the real embedding model (tests use a
     # fake one for speed) -- a genuine miss, a paraphrase that should hit,
     # and an unrelated query that should miss again.
@@ -112,3 +112,33 @@ if __name__ == "__main__":
         sim = f"{result.similarity:.4f}" if result.similarity is not None else "n/a"
         print(f"{'HIT ' if result.hit else 'MISS'}  sim={sim}  {query!r}")
         print(f"      -> {result.response}")
+
+
+def _run_interactive():
+    # Type your own queries and watch the router decide hit/miss live,
+    # against a cache that accumulates across the session -- try a query,
+    # then a paraphrase of it, then something unrelated.
+    router = CacheRouter("hnsw", threshold=OPERATING_THRESHOLD)
+    print(f"interactive mode, threshold={OPERATING_THRESHOLD}. empty line or ctrl-d to quit.\n")
+
+    while True:
+        try:
+            query = input("query> ").strip()
+        except EOFError:
+            print()
+            break
+        if not query:
+            break
+
+        result = router.route(query)
+        sim = f"{result.similarity:.4f}" if result.similarity is not None else "n/a"
+        print(f"  {'HIT ' if result.hit else 'MISS'}  sim={sim}  -> {result.response}")
+        print(f"  (cache now has {len(router.index)} entries)\n")
+
+
+if __name__ == "__main__":
+    import sys
+    if "--interactive" in sys.argv:
+        _run_interactive()
+    else:
+        _run_fixed_demo()
