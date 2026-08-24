@@ -324,3 +324,49 @@ The paraphrase hit at `0.826`, comfortably above the locked `0.80` threshold; th
 **Talking point:** "I designed the persistence strategy around a constraint I'd already measured, not a general best practice, the rebuild is only cheap because I'd already capped the realistic scale at 1k-10k earlier for cost reasons. The two decisions weren't made independently, the second one only works because of the first."
 
 ---
+
+## 20. Phase 6: the deployment constraint that invalidated a locked decision
+
+**The constraint, discovered while sizing the Lambda package:** `all-mpnet-base-v2` plus torch is roughly 2GB. A zip-packaged Lambda allows 250MB unzipped. So the embedding model that every measured number in this project was derived on cannot be deployed the way the rest of the system can.
+
+**Two real options, and why the cheaper-looking one wasn't free:**
+1. **Container-image Lambda** (10GB limit): keeps mpnet, keeps the locked `0.80` threshold, keeps every Phase 2 number valid. Costs a Docker/ECR build step and a slower cold start, on top of a cold start that already rebuilds the graph.
+2. **Embed via Bedrock instead** (Titan Text Embeddings V2): keeps the Lambda a small, fast zip. But it is a different model, therefore a different vector space, therefore **the `0.80` threshold does not transfer** and has to be re-derived.
+
+**Chose option 2, with the re-derivation treated as required work rather than a detail to skip.** This is the section 9 limit ("the threshold is tied to the model, not portable across a swap") arriving as a live consequence rather than a hypothetical. Worth being precise in an interview: the honest cost of the lighter deployment wasn't infrastructure complexity, it was invalidating a measured result and having to re-measure. The eval harness re-runs unchanged against the new backend (`--embedder bedrock`), which is the interface work from section 1 paying off a third time.
+
+**A framing that quietly stopped being true, and shouldn't be repeated unqualified.** Section 16 says Bedrock is "called only on cache miss." With a local embedding model that was literally true: a hit cost nothing external. Embedding via Bedrock means **every** request now makes a Bedrock call, hit or miss, because the query's vector is what the hit/miss decision is made *from*. The cost claim survives, since the avoided call is the far more expensive generative one, but the sentence needs the qualifier.
+
+---
+
+## 21. Debugging story #5: the falsy cache store, or why `or` is not a null check
+
+**The bug, in one line:** `CacheRouter.__init__` did `self.cache_store = cache_store or InMemoryCacheStore()`.
+
+**Why that is fine for four phases and catastrophic in the fifth.** `CacheStore` implements `__len__` (it's a container, so that's the right interface). Python falls back to `__len__` for truthiness when `__bool__` is absent, so **an empty store is falsy**. Passing in a real, correctly-constructed `DynamoDBCacheStore` that simply had no rows yet meant `or` discarded it and substituted a throwaway in-memory dict.
+
+**The failure mode this produces is the worst kind: silent and total.** A freshly deployed cache table is empty *by definition*. So on first deploy, every response would have been written to a dict that dies with the container, nothing would ever persist, every cold start would restore zero entries, and every query would miss forever. The system would return correct answers the whole time, at full LLM cost, while reporting itself healthy. There is no error, no exception, no failed assertion, no log line.
+
+**How it was actually caught, which is the transferable part:** not by reading the code, and not by unit tests. The in-memory store's own tests passed, the DynamoDB store's tests passed, and the router's tests passed, because every one of them either injected a non-empty store or didn't care which store it got. It surfaced only when running the *real handler* end to end against a mocked DynamoDB and simulating a container recycle: the cold-start log line read `"restored_entries": 0` when it should have read 2. The bug lived in the seam between two components that were each individually correct and individually tested.
+
+**The general lesson, and it's the same one as sections 6 and 13 from a third angle:** `or`-as-default is a truthiness test, not a null test, and the two only agree for types that are never legitimately empty/zero/false. For anything implementing `__len__`, they diverge exactly in the case that matters. `x if x is not None else default` says what was meant. Audited the other injectable dependencies in the codebase for the same pattern and converted them too, since a test double with a `__len__` would reintroduce it.
+
+**Talking point:** "The tests that would have caught it didn't exist because each component was tested in isolation and each one was correct. What found it was exercising the actual deployment path, including the failure event I was designing around, a cold start, and checking a number I'd instrumented rather than assuming the log meant what I wanted it to."
+
+---
+
+## 22. Two ids can collide across a restart, and one of them wins silently
+
+Related to section 21 and found in the same pass, but a separate defect worth its own note because the mechanism is different.
+
+**Setup:** cache entries get ids from a counter, `q_0`, `q_1`, ... The counter is an instance attribute, so it restarts at `0` in a fresh Lambda container. The cold-start rebuild restores the *vectors* into the graph, but nothing was restoring the *counter*.
+
+**The consequence:** a rebuilt container holding restored entries `q_0..q_5` would mint `q_0` again on its very next miss. The index would then contain two nodes claiming id `q_0` with different vectors, while the store held one response under it, the newer one. A later query matching the *old* `q_0` vector would be served the *new*, unrelated answer, above threshold, with high confidence.
+
+**Why that's worth naming precisely:** this is the project's central failure mode ("the cache confidently serves a wrong answer to a question that only sounded like a cached one, with no visible failure signal") arriving through a completely different door. Phases 1-5 spent their effort making sure the *similarity threshold* couldn't produce that outcome. This one produces the identical outcome with a perfect similarity score, via id bookkeeping, and no threshold value defends against it.
+
+**The fix, and where it belongs:** `CacheRouter.restore()` replays the vectors and advances the counter past the highest restored id. The first draft had the Lambda handler do this, reaching into `router._next_id` and parsing the `"q_<n>"` format itself. That put knowledge of the id format in two places and made the deployment layer responsible for an invariant of the router. Moving it onto the router keeps the format in one place and makes the rule enforceable by the component that owns it.
+
+**Talking point:** "The threshold work protects against semantically wrong matches. This was an exactly-wrong match, similarity 1.0, caused by bookkeeping rather than embeddings, and no threshold tuning would ever have caught it. Same user-visible failure, completely different cause, which is why I fixed it at the layer that owns id generation instead of at the call site that noticed it."
+
+---

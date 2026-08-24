@@ -2,7 +2,7 @@
 
 ## Current status
 
-- Phase 1 through Phase 5 are complete and pushed. Phase 6 (AWS wiring) has its architecture and persistence strategy fully decided and documented, but implementation is deliberately deferred to its own dedicated session -- see "Handoff for Phase 6" below.
+- Phase 1 through Phase 5 are complete and pushed. **Phase 6 is built but not yet deployed or measured**, blocked on an external AWS constraint, not on code -- see "Phase 6 status" below.
 - The baseline implementation in src/linear_search.py is in place and validated with focused tests.
 - Scaffolding is decoupled around a shared index contract so linear search and HNSW are hot-swappable (swap happens at one factory call, nothing downstream changes).
 - The eval harness (eval/threshold_sweep.py) is built, verified against a 194-pair hand-authored test set, and has produced a documented operating threshold. Full reasoning lives in knowledge/learned.md.
@@ -39,32 +39,31 @@
 
 ## Next milestone
 
-- Begin Phase 6 implementation, in its own dedicated session (see "Handoff for Phase 6" below for exactly where to start).
+- Re-derive the operating threshold against Titan, then deploy. Both are blocked on Bedrock quota, see "Phase 6 status" below.
 - Keep notes brief and evidence-backed.
 
-## Handoff for Phase 6 (start here in a fresh session)
+## Phase 6 status
 
-Everything needed to pick this up cold is in this file plus knowledge/learned.md sections 16, 18, and 19 -- read those three first.
+Read learned.md sections 16 and 19 (the decisions) plus 20, 21, and 22 (what building it actually taught) to pick this up cold.
 
-**Already decided, don't re-litigate unless new evidence shows up:**
-- Architecture: API Gateway (HTTP API) + Lambda + DynamoDB (on-demand) + Bedrock (miss only) + CloudWatch. OpenSearch Serverless and provisioned concurrency are both explicitly rejected for cost reasons (learned.md section 16, 19).
-- Persistence: rebuild the HNSW graph from DynamoDB on every Lambda cold start, using the existing insert() as-is. No graph serialization format needed yet.
-- index_kind is always "hnsw" for the deployed system. LinearIndex never gets deployed.
-- The LLM call is currently a stub in src/cache_router.py (call_llm); swapping in real Bedrock is part of this phase, done deliberately once the deployment shape is proven, not bundled into earlier debugging.
+**Built and locally verified:**
+- `src/embedder.py` / `local_embedder.py` / `bedrock_embedder.py` / `embedder_factory.py`: the embedding backend is now an interface with two implementations, same seam as VectorIndex and CacheStore. Forced by the deployment (mpnet + torch is ~2GB, past Lambda's zip limit), reasoning in learned.md section 20.
+- `src/dynamodb_cache_store.py`: DynamoDBCacheStore against the existing CacheStore contract, plus `all_items()` for the cold-start rebuild. Tested against moto, including Scan pagination.
+- `src/lambda_handler.py`: cold-start rebuild + routing + structured JSON logs for the eventual dashboard.
+- `src/bedrock_llm.py`: the real Claude call, replacing the Phase 5 stub.
+- `template.yaml`: HTTP API + Lambda + on-demand DynamoDB, IAM scoped to the one table and to Bedrock model ARNs. `sam validate --lint` passes and `sam build` succeeds (~102MB artifact, correct x86_64 linux wheels).
+- 46/46 tests passing. The full handler path, including a simulated container recycle, was exercised end to end against a mocked DynamoDB.
+- Two real bugs found and fixed in the process, both of which would have shipped silently: a falsy empty cache store being discarded by an `or` default (learned.md section 21), and id-counter collisions across a restart serving wrong answers at similarity 1.0 (section 22).
 
-**Already done, ready to build on:**
-- src/cache_router.py: CacheRouter, fully tested (34/34 tests), verified end-to-end with the real embedding model and manually via `python src/cache_router.py --interactive`.
-- src/cache_store.py: CacheStore ABC + InMemoryCacheStore. DynamoDBCacheStore needs to implement the same three-method contract (put/get/__len__).
-- Local tooling: aws-cli 2.36.29 and SAM CLI 1.165.0 already installed via Homebrew.
+**Blocked, and not on anything in the repo:** the AWS account is new. Account verification cleared, and Titan Text Embeddings V2 shows `AUTHORIZED` / `AVAILABLE`, but **every Bedrock on-demand quota on the account is currently 0 requests/minute**, so `InvokeModel` returns `ThrottlingException`. Titan's on-demand RPM quota (`L-26C560CE`) is marked `Adjustable: False`, so it is AWS-side provisioning to wait out rather than a quota increase to request. Claude Haiku 4.5's cross-region quotas (`L-CCA5DF70`, `L-E5084BBA`) are adjustable and also currently 0.
 
-**Not yet done -- concrete next steps, in order:**
-1. Configure AWS credentials locally (`aws configure`, run directly by the user in their own terminal -- never through an assistant's tool calls, so access keys never pass through a transcript). Verify with `aws sts get-caller-identity`.
-2. Write DynamoDBCacheStore (src/cache_store.py) against the existing CacheStore contract.
-3. Write a Lambda handler that wraps CacheRouter, with the cold-start rebuild logic from learned.md section 19.
-4. Write the SAM template (template.yaml) defining the API Gateway + Lambda + DynamoDB resources.
-5. Swap the stubbed call_llm for a real Bedrock call.
-6. Deploy with `sam build && sam deploy --guided`, verify end-to-end against the real stack.
-7. Wire up the CloudWatch dashboard (hit rate, latency, cost saved) once the core deployment is proven.
+**Next steps, once Bedrock quota is non-zero:**
+1. Re-derive the operating threshold against Titan: `python eval/threshold_sweep.py --embedder bedrock`, over the same locked 194-pair set. The 0.80 from Phase 2 belongs to all-mpnet-base-v2 and does **not** transfer (learned.md sections 9 and 20). Pick the new value on the same asymmetric cost model as section 11 and document it.
+2. Put that number in `template.yaml`'s `OperatingThreshold` parameter (it currently defaults to 0.80 as a placeholder, which is wrong for Titan).
+3. `sam deploy --guided`, then verify against the live URL with a miss / paraphrase-hit / unrelated-miss trio, the same shape as the local `_run_fixed_demo()`.
+4. CloudWatch dashboard (hit rate, latency, cost saved) off the structured log lines the handler already emits.
+
+**Worth measuring once deployed, since it's the honest cost of the chosen design:** real cold-start rebuild time at a realistic entry count. The handler already logs `rebuild_seconds`; learned.md section 19 predicts ~16.5s at n=10,000 from local benchmarks, and that prediction should be checked against the real thing rather than quoted.
 
 ## Guardrail note
 
