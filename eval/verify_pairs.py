@@ -27,7 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from embedding import DEFAULT_MODEL, Embedder
+from local_embedder import DEFAULT_MODEL, SentenceTransformerEmbedder
 from factory import create_index
 from threshold_sweep import DATA_PATH, load_pairs
 
@@ -47,7 +47,7 @@ ANCHOR_DUPLICATE_THRESHOLD = 0.85
 def main():
     model_name = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODEL
     pairs = load_pairs()
-    embedder = Embedder(model_name)
+    embedder = SentenceTransformerEmbedder(model_name)
     print(f"model: {embedder.model_name} (dim={embedder.dim})")
     print(f"checking {len(pairs)} pairs from {DATA_PATH}\n")
 

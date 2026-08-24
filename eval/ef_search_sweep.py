@@ -23,7 +23,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from embedding import Embedder
+from local_embedder import SentenceTransformerEmbedder
 from factory import create_index
 from scale_dataset import load_seed_anchors, generate_synthetic_vectors
 
@@ -35,7 +35,7 @@ RESULTS_PATH = os.path.join(os.path.dirname(__file__), "results", "phase4_ef_swe
 
 def main():
     anchors = load_seed_anchors()
-    embedder = Embedder("all-mpnet-base-v2")
+    embedder = SentenceTransformerEmbedder("all-mpnet-base-v2")
     raw = embedder.embed_batch([t for _, t in anchors])
     anchor_vectors = (raw / np.linalg.norm(raw, axis=1, keepdims=True)).astype(np.float32)
 

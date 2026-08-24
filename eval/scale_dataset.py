@@ -71,10 +71,10 @@ if __name__ == "__main__":
     # calibrated for.
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-    from embedding import Embedder
+    from local_embedder import SentenceTransformerEmbedder
 
     anchors = load_seed_anchors()
-    embedder = Embedder("all-mpnet-base-v2")
+    embedder = SentenceTransformerEmbedder("all-mpnet-base-v2")
     raw = embedder.embed_batch([t for _, t in anchors])
     anchor_vectors = raw / np.linalg.norm(raw, axis=1, keepdims=True)
 
