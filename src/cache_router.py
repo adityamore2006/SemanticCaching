@@ -46,6 +46,11 @@ from factory import create_index
 
 OPERATING_THRESHOLD = 0.80  # locked in Phase 2, see knowledge/learned.md section 11
 
+# Cache entry ids are "q_0", "q_1", ... Defined once here because two
+# places depend on the format: route() minting new ids, and restore()
+# reading the counter back out of persisted ones.
+ID_PREFIX = "q_"
+
 
 def call_llm(query: str) -> str:
     """Phase 5 stub -- deterministic, free, fast to test. Real Bedrock
@@ -77,7 +82,11 @@ class CacheRouter:
     ):
         self.embedder = embedder
         self.index = create_index(index_kind, dim=self.embedder.dim, **index_params)
-        self.cache_store = cache_store or InMemoryCacheStore()
+        # `is None`, not `or`. CacheStore implements __len__, so an empty
+        # store is falsy -- `cache_store or InMemoryCacheStore()` silently
+        # discarded any store that happened to be empty at construction,
+        # which is exactly the state a real one is in on first deploy.
+        self.cache_store = InMemoryCacheStore() if cache_store is None else cache_store
         self.threshold = threshold
         self.llm = llm
         self._next_id = 0
@@ -100,11 +109,43 @@ class CacheRouter:
         # Miss: either the index was empty, or the best match didn't
         # clear the threshold.
         response = self.llm(query)
-        new_id = f"q_{self._next_id}"
+        new_id = f"{ID_PREFIX}{self._next_id}"
         self._next_id += 1
         self.index.insert(new_id, vector)
         self.cache_store.put(new_id, response, vector)
         return RouteResult(response=response, hit=False, matched_id=matched_id, similarity=similarity)
+
+    def restore(self, entries):
+        """
+        Rebuild in-memory index state from previously persisted entries,
+        returning how many were restored.
+
+        Exists for deployments whose process doesn't outlive the cache:
+        Lambda containers are stateless between invocations, so a cold
+        start replays every stored (id, vector) through the ordinary
+        insert() path rather than deserializing a saved graph
+        (knowledge/learned.md section 19).
+
+        Resuming the id counter is the subtle part, and the reason this is
+        the router's job rather than the caller's. Ids come from a counter
+        that restarts at zero in a fresh process, so without this a
+        restored router would hand out ids that already exist in storage
+        and silently overwrite earlier cache entries -- a wrong answer
+        served with no failure signal, the exact hazard this project is
+        built to avoid.
+        """
+        restored = 0
+        highest = -1
+        for entry_id, vector in entries:
+            self.index.insert(entry_id, vector)
+            restored += 1
+            if isinstance(entry_id, str) and entry_id.startswith(ID_PREFIX):
+                suffix = entry_id[len(ID_PREFIX):]
+                if suffix.isdigit():
+                    highest = max(highest, int(suffix))
+
+        self._next_id = max(self._next_id, highest + 1)
+        return restored
 
 
 def _run_fixed_demo():

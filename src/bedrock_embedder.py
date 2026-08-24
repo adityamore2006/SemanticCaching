@@ -65,7 +65,9 @@ class BedrockEmbedder(Embedder):
         self.max_workers = max_workers
         # Injectable for tests; in Lambda the default client picks up the
         # execution role's credentials and region automatically.
-        self.client = client or boto3.client("bedrock-runtime", region_name=region_name)
+        if client is None:
+            client = boto3.client("bedrock-runtime", region_name=region_name)
+        self.client = client
 
     def embed(self, text):
         response = self.client.invoke_model(

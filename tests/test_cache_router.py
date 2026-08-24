@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 
 from cache_router import CacheRouter
+from cache_store import InMemoryCacheStore
 
 
 class FakeEmbedder:
@@ -109,6 +110,76 @@ def test_works_with_hnsw_index_too():
     assert first.hit is False
     assert second.hit is True
     assert second.response == first.response
+
+
+def test_an_empty_injected_cache_store_is_still_used():
+    # Regression: __init__ used `cache_store or InMemoryCacheStore()`, and
+    # CacheStore implements __len__, so an EMPTY store was falsy and got
+    # silently swapped for an in-memory one. A freshly deployed persistent
+    # store is empty by definition, so the deployed cache would have
+    # written every entry to a throwaway dict and persisted nothing --
+    # every query missing forever, with no failure signal.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    assert len(store) == 0
+
+    router = CacheRouter("linear", embedder=embedder, cache_store=store)
+    router.route("reset password")
+
+    assert router.cache_store is store
+    assert len(store) == 1
+
+
+def test_restore_rebuilds_the_index_and_serves_hits_from_it():
+    # Simulates a Lambda cold start: a fresh router with an empty index,
+    # handed the vectors a previous container had persisted.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    store.put("q_0", "restored answer")
+    router = CacheRouter("hnsw", embedder=embedder, cache_store=store)
+
+    restored = router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
+
+    assert restored == 1
+    result = router.route("reset password")
+    assert result.hit is True
+    assert result.response == "restored answer"
+
+
+def test_restore_resumes_the_id_counter_instead_of_overwriting_entries():
+    # The failure this guards: a restored router whose counter restarted
+    # at 0 would mint "q_0" again on the next miss, overwriting a cached
+    # entry that still exists in the index -- so a later query could match
+    # the old vector and be served the new, unrelated response.
+    calls = []
+    embedder = FakeEmbedder({
+        "reset password": [1.0, 0.0],
+        "change my email": [0.7, 0.7141428428542852],
+    })
+    store = InMemoryCacheStore()
+    store.put("q_0", "restored answer")
+    router = CacheRouter(
+        "linear", embedder=embedder, cache_store=store, llm=counting_llm(calls)
+    )
+    router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
+
+    # Below the 0.80 threshold, so this is a miss and mints a new id.
+    router.route("change my email")
+
+    assert store.get("q_0") == "restored answer"  # untouched
+    assert store.get("q_1") == "real answer to: change my email"
+    assert len(router.index) == 2
+
+
+def test_restore_ignores_ids_that_do_not_follow_the_counter_format():
+    # Ids that didn't come from the counter shouldn't corrupt it.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    router = CacheRouter("linear", embedder=embedder)
+
+    router.restore([("seeded-entry", np.array([0.0, 1.0], dtype=np.float32))])
+    router.route("reset password")
+
+    assert router.cache_store.get("q_0") == "[stub response for: reset password]"
 
 
 def test_custom_threshold_is_respected():
