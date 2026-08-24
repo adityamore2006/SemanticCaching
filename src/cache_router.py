@@ -25,13 +25,23 @@ index_kind has no default on purpose -- HNSW only wins on speed once the
 cache has warmed up past a few thousand entries (knowledge/learned.md
 section 17), so which index a router uses should be a stated choice at
 construction time, not a silently assumed one.
+
+`embedder` has no default for the same reason, and for a concrete one:
+it used to default to sentence-transformers' own default model
+(all-MiniLM-L6-v2), which is NOT the model the 0.80 threshold below was
+calibrated on (all-mpnet-base-v2, section 11). Every local run that didn't
+pass an embedder explicitly was quietly measuring one model against
+another model's threshold. Now that a Bedrock backend exists too, with its
+own separately-derived threshold, which vector space a router operates in
+is far too load-bearing to leave implicit.
 """
 
 from dataclasses import dataclass
 from typing import Callable, Hashable, Optional
 
 from cache_store import CacheStore, InMemoryCacheStore
-from embedding import Embedder
+from embedder import Embedder
+from embedder_factory import create_embedder
 from factory import create_index
 
 OPERATING_THRESHOLD = 0.80  # locked in Phase 2, see knowledge/learned.md section 11
@@ -59,13 +69,13 @@ class CacheRouter:
     def __init__(
         self,
         index_kind: str,
-        embedder: Embedder = None,
+        embedder: Embedder,
         cache_store: CacheStore = None,
         threshold: float = OPERATING_THRESHOLD,
         llm: Callable[[str], str] = call_llm,
         **index_params,
     ):
-        self.embedder = embedder or Embedder()
+        self.embedder = embedder
         self.index = create_index(index_kind, dim=self.embedder.dim, **index_params)
         self.cache_store = cache_store or InMemoryCacheStore()
         self.threshold = threshold
@@ -93,7 +103,7 @@ class CacheRouter:
         new_id = f"q_{self._next_id}"
         self._next_id += 1
         self.index.insert(new_id, vector)
-        self.cache_store.put(new_id, response)
+        self.cache_store.put(new_id, response, vector)
         return RouteResult(response=response, hit=False, matched_id=matched_id, similarity=similarity)
 
 
@@ -101,7 +111,11 @@ def _run_fixed_demo():
     # Runnable end-to-end demo with the real embedding model (tests use a
     # fake one for speed) -- a genuine miss, a paraphrase that should hit,
     # and an unrelated query that should miss again.
-    router = CacheRouter("hnsw", threshold=OPERATING_THRESHOLD)
+    router = CacheRouter(
+        "hnsw",
+        embedder=create_embedder("local"),
+        threshold=OPERATING_THRESHOLD,
+    )
 
     for query in [
         "How do I reset my password?",
@@ -118,7 +132,11 @@ def _run_interactive():
     # Type your own queries and watch the router decide hit/miss live,
     # against a cache that accumulates across the session -- try a query,
     # then a paraphrase of it, then something unrelated.
-    router = CacheRouter("hnsw", threshold=OPERATING_THRESHOLD)
+    router = CacheRouter(
+        "hnsw",
+        embedder=create_embedder("local"),
+        threshold=OPERATING_THRESHOLD,
+    )
     print(f"interactive mode, threshold={OPERATING_THRESHOLD}. empty line or ctrl-d to quit.\n")
 
     while True:

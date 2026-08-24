@@ -1,3 +1,9 @@
 numpy
 pytest
 sentence-transformers
+
+# Phase 6 (AWS). boto3 ships in the Lambda runtime already, so it's here
+# for local dev and tests; moto mocks DynamoDB so the store's tests never
+# touch a real table or cost anything.
+boto3
+moto[dynamodb]

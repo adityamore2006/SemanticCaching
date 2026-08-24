@@ -24,7 +24,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from embedding import Embedder
+from local_embedder import SentenceTransformerEmbedder
 from factory import create_index
 
 from threshold_sweep import (
@@ -83,7 +83,7 @@ def compute_pair_results(pairs, index, text_to_id, embedder):
 
 def main():
     pairs = load_pairs()
-    embedder = Embedder(MODEL_NAME)
+    embedder = SentenceTransformerEmbedder(MODEL_NAME)
     print(f"embedding model: {LABEL} (dim={embedder.dim})")
     print(f"loaded {len(pairs)} pairs")
 

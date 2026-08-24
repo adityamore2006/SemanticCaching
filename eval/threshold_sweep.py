@@ -18,14 +18,24 @@ Swapping this harness to grade HNSW instead of linear search (Phase 4) is
 a one-line change: create_index("linear", ...) -> create_index("hnsw", ...).
 Nothing else here should need to change.
 
-Run against a specific embedding model to compare it against prior runs:
-    python eval/threshold_sweep.py [model_name]
-Defaults to Embedder's default (all-MiniLM-L6-v2) if no model is given.
+Run against a specific embedding backend/model to compare it against
+prior runs:
+    python eval/threshold_sweep.py                       # local, mpnet
+    python eval/threshold_sweep.py --embedder bedrock    # Titan V2
+    python eval/threshold_sweep.py --model all-MiniLM-L6-v2
+
 Each run writes its own file under eval/results/<model_name>.json (so
 multiple models' results sit on disk side by side, nothing gets
 overwritten) and appends one summary row to eval/results/log.md.
+
+The --embedder flag is what Phase 6 needed: the deployed Lambda embeds via
+Bedrock rather than sentence-transformers, and a threshold does not carry
+across vector spaces (knowledge/learned.md section 9), so the deployed
+threshold has to be re-derived by running this exact harness, unchanged,
+against the other backend.
 """
 
+import argparse
 import datetime
 import json
 import os
@@ -33,7 +43,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from embedding import DEFAULT_MODEL, Embedder
+from embedder_factory import create_embedder
 from factory import create_index
 
 DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "eval_pairs.json")
@@ -155,7 +165,10 @@ def print_table(rows):
 
 
 def results_path_for(model_name):
-    slug = model_name.replace("/", "__")
+    # Bedrock model ids carry a version suffix ("...-v2:0"); the colon is
+    # legal in a filename but awkward to type and quote, so flatten it the
+    # same way the "/" in HuggingFace org-prefixed names already is.
+    slug = model_name.replace("/", "__").replace(":", "_")
     return os.path.join(RESULTS_DIR, f"{slug}.json")
 
 
@@ -188,10 +201,25 @@ def append_log_entry(embedder, threshold_rows):
 
 
 def main():
-    model_name = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODEL
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--embedder",
+        default="local",
+        choices=["local", "bedrock"],
+        help="embedding backend: local sentence-transformers, or Bedrock (what the Lambda deploys)",
+    )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="model name/id; defaults to the chosen backend's own default",
+    )
+    args = parser.parse_args()
 
     pairs = load_pairs()
-    embedder = Embedder(model_name)
+    # Omitting model_name entirely lets each backend apply its own default
+    # rather than this harness having to know what those defaults are.
+    params = {"model_name": args.model} if args.model else {}
+    embedder = create_embedder(args.embedder, **params)
     print(f"embedding model: {embedder.model_name} (dim={embedder.dim})")
     print(f"loaded {len(pairs)} pairs from {DATA_PATH}")
 
