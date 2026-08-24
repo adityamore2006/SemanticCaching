@@ -1,0 +1,11 @@
+# Lambda package dependencies -- deliberately small.
+#
+# What is NOT here is the point: sentence-transformers and torch (~2GB)
+# would blow past Lambda's 250MB unzipped limit and force a container
+# image. Embedding via Bedrock instead (bedrock_embedder.py) keeps this to
+# numpy plus a pure-Python SDK, so the function stays a plain zip.
+#
+# boto3 already ships in the Lambda runtime, so it's intentionally absent
+# here -- pinning it would just add megabytes to the artifact.
+numpy
+anthropic[bedrock]
