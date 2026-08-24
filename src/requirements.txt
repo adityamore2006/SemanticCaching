@@ -5,7 +5,11 @@
 # image. Embedding via Bedrock instead (bedrock_embedder.py) keeps this to
 # numpy plus a pure-Python SDK, so the function stays a plain zip.
 #
-# boto3 already ships in the Lambda runtime, so it's intentionally absent
-# here -- pinning it would just add megabytes to the artifact.
+# boto3 is not listed directly because the Lambda runtime already provides
+# it; it still lands in the artifact as a transitive dependency of
+# anthropic[bedrock], which is fine -- a pinned, current version beats
+# whatever the runtime happens to ship.
+#
+# Built size: ~102MB unzipped, against Lambda's 250MB limit.
 numpy
 anthropic[bedrock]
