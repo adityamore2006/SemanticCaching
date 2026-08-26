@@ -13,6 +13,7 @@ class FakeEmbedder:
     """
 
     dim = 2
+    model_name = "fake-embedder"
 
     def __init__(self, vectors):
         self.vectors = vectors  # text -> raw vector
@@ -180,6 +181,80 @@ def test_restore_ignores_ids_that_do_not_follow_the_counter_format():
     router.route("reset password")
 
     assert router.cache_store.get("q_0") == "[stub response for: reset password]"
+
+
+def test_snapshot_roundtrips_the_index_and_serves_hits(tmp_path):
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    router = CacheRouter("hnsw", embedder=embedder, cache_store=store)
+    router.route("reset password")
+    path = tmp_path / "graph.pkl"
+    router.save_snapshot(path)
+
+    # A fresh process: same store, empty index until the snapshot loads.
+    revived = CacheRouter("hnsw", embedder=embedder, cache_store=store)
+    assert len(revived.index) == 0
+    assert revived.load_snapshot(path) is True
+
+    result = revived.route("reset password")
+    assert result.hit is True
+    assert len(revived.index) == 1
+
+
+def test_snapshot_carries_the_id_counter(tmp_path):
+    # The section 22 failure, now via the snapshot path: restoring the
+    # graph without its counter would reissue q_0 over a live entry.
+    embedder = FakeEmbedder({
+        "reset password": [1.0, 0.0],
+        "change my email": [0.7, 0.7141428428542852],
+    })
+    store = InMemoryCacheStore()
+    router = CacheRouter("linear", embedder=embedder, cache_store=store)
+    router.route("reset password")  # mints q_0
+    path = tmp_path / "graph.pkl"
+    router.save_snapshot(path)
+
+    revived = CacheRouter("linear", embedder=embedder, cache_store=store)
+    revived.load_snapshot(path)
+    revived.route("change my email")  # a miss, mints the next id
+
+    assert store.get("q_0") == "[stub response for: reset password]"
+    assert store.get("q_1") == "[stub response for: change my email]"
+
+
+def test_snapshot_from_a_different_embedding_model_is_rejected(tmp_path):
+    # Vectors only mean something in the space that produced them, so a
+    # snapshot built by another model is not stale, it is nonsense. Loading
+    # it would compare this model's queries against that model's vectors
+    # and serve confident garbage.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    router = CacheRouter("hnsw", embedder=embedder)
+    router.route("reset password")
+    path = tmp_path / "graph.pkl"
+    router.save_snapshot(path)
+
+    other = FakeEmbedder({"reset password": [1.0, 0.0]})
+    other.model_name = "some-other-model"
+    revived = CacheRouter("hnsw", embedder=other)
+
+    assert revived.load_snapshot(path) is False
+    assert len(revived.index) == 0  # left empty, caller falls back to the store
+
+
+def test_load_snapshot_returns_false_when_there_is_no_file(tmp_path):
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    router = CacheRouter("hnsw", embedder=embedder)
+    assert router.load_snapshot(tmp_path / "does-not-exist.pkl") is False
+
+
+def test_load_snapshot_returns_false_on_a_corrupt_file(tmp_path):
+    # A truncated or garbage snapshot must not crash startup: DynamoDB is
+    # the source of truth and rebuilding from it is always available.
+    path = tmp_path / "graph.pkl"
+    path.write_bytes(b"not a pickle")
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    router = CacheRouter("hnsw", embedder=embedder)
+    assert router.load_snapshot(path) is False
 
 
 def test_custom_threshold_is_respected():

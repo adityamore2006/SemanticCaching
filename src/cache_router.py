@@ -36,6 +36,8 @@ own separately-derived threshold, which vector space a router operates in
 is far too load-bearing to leave implicit.
 """
 
+import os
+import pickle
 from dataclasses import dataclass
 from typing import Callable, Hashable, Optional
 
@@ -50,6 +52,10 @@ OPERATING_THRESHOLD = 0.80  # locked in Phase 2, see knowledge/learned.md sectio
 # places depend on the format: route() minting new ids, and restore()
 # reading the counter back out of persisted ones.
 ID_PREFIX = "q_"
+
+# Bumped whenever the snapshot payload's shape changes, so an old file is
+# rejected and rebuilt rather than unpickled into a subtly wrong state.
+SNAPSHOT_VERSION = 1
 
 
 def call_llm(query: str) -> str:
@@ -147,11 +153,89 @@ class CacheRouter:
         self._next_id = max(self._next_id, highest + 1)
         return restored
 
+    def save_snapshot(self, path) -> None:
+        """
+        Write the built index and its id counter to a local file.
+
+        Why both, and why in one call: the id counter is not decoration,
+        it's an invariant of the graph. A snapshot holding the index alone
+        would restore entries q_0..q_5 while the counter restarted at 0,
+        reissuing live ids and serving stored answers to unrelated queries
+        at similarity 1.0 (knowledge/learned.md section 22). Keeping them
+        in one payload makes that desync unrepresentable rather than
+        merely discouraged.
+
+        Written to a temp file and renamed, because os.replace is atomic:
+        a crash mid-write leaves the previous good snapshot intact instead
+        of a truncated file that would fail to load on next boot.
+        """
+        payload = {
+            "version": SNAPSHOT_VERSION,
+            # Vectors only mean anything in the space that produced them
+            # (section 9), so the snapshot records which model that was
+            # and load_snapshot refuses a mismatch.
+            "model_name": self.embedder.model_name,
+            "dim": self.embedder.dim,
+            "index": self.index,
+            "next_id": self._next_id,
+        }
+        tmp = f"{path}.tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+
+    def load_snapshot(self, path) -> bool:
+        """
+        Restore index + id counter from a snapshot. Returns True if it was
+        loaded, False if there was nothing usable.
+
+        Every rejection path returns False rather than raising, because
+        the caller always has a correct fallback: rebuilding from the
+        durable store. A snapshot is an optimization, never the source of
+        truth, so a bad one should cost startup time and nothing else.
+        """
+        try:
+            with open(path, "rb") as f:
+                payload = pickle.load(f)
+        except (OSError, pickle.UnpicklingError, EOFError, AttributeError):
+            return False
+
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("version") != SNAPSHOT_VERSION:
+            return False
+        # A snapshot from a different embedding model is not stale, it's
+        # meaningless: the stored vectors live in a space this embedder
+        # never produces, so every similarity against them would be
+        # nonsense. Reject rather than silently serve wrong matches.
+        if payload.get("model_name") != self.embedder.model_name:
+            return False
+        if payload.get("dim") != self.embedder.dim:
+            return False
+
+        index = payload.get("index")
+        next_id = payload.get("next_id")
+        if index is None or not isinstance(next_id, int):
+            return False
+
+        self.index = index
+        self._next_id = next_id
+        return True
+
 
 def _run_fixed_demo():
     # Runnable end-to-end demo with the real embedding model (tests use a
     # fake one for speed) -- a genuine miss, a paraphrase that should hit,
     # and an unrelated query that should miss again.
+    #
+    # The pair below is drawn from the verified eval set rather than
+    # invented, and deliberately: at 0.80 on all-mpnet-base-v2 only 22% of
+    # real paraphrases clear the threshold (knowledge/learned.md section
+    # 11), so a demo pair has to be one that actually does. An earlier
+    # version of this demo used a password-reset pair that scores 0.783 on
+    # mpnet and therefore misses; it only appeared to pass because the
+    # demo was silently running a different model than the threshold was
+    # calibrated on (section 24).
     router = CacheRouter(
         "hnsw",
         embedder=create_embedder("local"),
@@ -159,8 +243,8 @@ def _run_fixed_demo():
     )
 
     for query in [
-        "How do I reset my password?",
-        "I forgot my password, how do I get back into my account?",
+        "Can I merge two accounts into one?",
+        "Is it possible to combine my two separate accounts?",
         "Does this integrate with Slack?",
     ]:
         result = router.route(query)

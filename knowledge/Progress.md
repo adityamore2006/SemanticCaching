@@ -42,7 +42,30 @@
 - Re-derive the operating threshold against Titan, then deploy. Both are blocked on Bedrock quota, see "Phase 6 status" below.
 - Keep notes brief and evidence-backed.
 
-## Phase 6 status
+## Phase 6 status (revised: EC2, not Lambda)
+
+**The platform changed.** The Lambda/container design was built, then replaced with a single small EC2 instance running FastAPI. Reasoning and the cost comparison are in learned.md section 23; the short version is that Lambda's cold start is recurring and externally scheduled, which a latency-sensitive cache cannot absorb, and keeping a Lambda warm costs more than just running the instance.
+
+**Deleted:** `src/lambda_handler.py`, `template.yaml`, `src/requirements.txt`, and with them the whole container path (Docker, ECR, SAM packaging). All of it existed to work around Lambda's 250MB limit.
+
+**Added:** `src/api.py` (FastAPI: `/query`, `/health`, `/stats`), plus `CacheRouter.save_snapshot()` / `load_snapshot()` so the built graph persists to the instance's disk and reloads at boot instead of being rebuilt every time.
+
+**Embedding is local again** (`all-mpnet-base-v2`), so the locked 0.80 threshold and all of Phase 2's eval work stay valid. No re-derivation needed. `bedrock_embedder.py` and the factory's `"bedrock"` entry are kept deliberately, since having two backends behind one interface is what made this switch a small change.
+
+**A fourth bug, found by the switch:** the end-to-end demo had been passing on the wrong embedding model for two phases, so learned.md section 18's recorded numbers were MiniLM's, not mpnet's. Corrected, with the full story in section 24. The demo pair was re-chosen from the verified eval set to one that genuinely clears the threshold on the correct model.
+
+**Verified locally:** 51/51 tests pass. The API was run end to end with the real model across two boots, confirming the snapshot round-trips (`restored_from=snapshot`, hit at similarity 1.0 on the second boot) and that a fresh boot with no snapshot and no DynamoDB still works.
+
+### Next steps
+
+1. **Provision AWS resources** (see the setup guide handed over separately): DynamoDB table, IAM role for the instance, security group, and the EC2 instance itself.
+2. **Deploy:** clone, create the venv, install requirements, add a systemd unit for uvicorn, start it.
+3. **Request the Bedrock quota increase** for Claude Haiku 4.5 (`L-CCA5DF70` requests/min, `L-58BE175A` tokens/min, both adjustable and currently 0). Until that clears the miss path uses the Phase 5 stub, which is set automatically when `LLM_MODEL_ID` is unset, so the cache is fully demonstrable without it.
+4. **Measure and record:** time from `start-instances` to first successful response, and warm request latency. Both go in learned.md next to the Lambda cold-start figures they replace, because the comparison is the story.
+
+---
+
+## Superseded: the Lambda build (kept for the reasoning)
 
 Read learned.md sections 16 and 19 (the decisions) plus 20, 21, and 22 (what building it actually taught) to pick this up cold.
 
@@ -55,15 +78,9 @@ Read learned.md sections 16 and 19 (the decisions) plus 20, 21, and 22 (what bui
 - 46/46 tests passing. The full handler path, including a simulated container recycle, was exercised end to end against a mocked DynamoDB.
 - Two real bugs found and fixed in the process, both of which would have shipped silently: a falsy empty cache store being discarded by an `or` default (learned.md section 21), and id-counter collisions across a restart serving wrong answers at similarity 1.0 (section 22).
 
-**Blocked, and not on anything in the repo:** the AWS account is new. Account verification cleared, and Titan Text Embeddings V2 shows `AUTHORIZED` / `AVAILABLE`, but **every Bedrock on-demand quota on the account is currently 0 requests/minute**, so `InvokeModel` returns `ThrottlingException`. Titan's on-demand RPM quota (`L-26C560CE`) is marked `Adjustable: False`, so it is AWS-side provisioning to wait out rather than a quota increase to request. Claude Haiku 4.5's cross-region quotas (`L-CCA5DF70`, `L-E5084BBA`) are adjustable and also currently 0.
+**The Bedrock finding that came out of it, still relevant:** the AWS account is new. Account verification cleared and models show `AUTHORIZED` / `AVAILABLE`, but **every Bedrock on-demand quota on the account is 0 requests/minute**, so `InvokeModel` returns `ThrottlingException` in every region tested, for Titan and every Claude model, and it did not clear after a day. Titan's quota (`L-26C560CE`) is `Adjustable: False`, so it is AWS-side provisioning rather than something to request. Claude Haiku 4.5's (`L-CCA5DF70`, `L-58BE175A`) are adjustable and unrequested. This is what made a Bedrock-embedding design untenable and is why embedding moved back to local mpnet.
 
-**Next steps, once Bedrock quota is non-zero:**
-1. Re-derive the operating threshold against Titan: `python eval/threshold_sweep.py --embedder bedrock`, over the same locked 194-pair set. The 0.80 from Phase 2 belongs to all-mpnet-base-v2 and does **not** transfer (learned.md sections 9 and 20). Pick the new value on the same asymmetric cost model as section 11 and document it.
-2. Put that number in `template.yaml`'s `OperatingThreshold` parameter (it currently defaults to 0.80 as a placeholder, which is wrong for Titan).
-3. `sam deploy --guided`, then verify against the live URL with a miss / paraphrase-hit / unrelated-miss trio, the same shape as the local `_run_fixed_demo()`.
-4. CloudWatch dashboard (hit rate, latency, cost saved) off the structured log lines the handler already emits.
-
-**Worth measuring once deployed, since it's the honest cost of the chosen design:** real cold-start rebuild time at a realistic entry count. The handler already logs `rebuild_seconds`; learned.md section 19 predicts ~16.5s at n=10,000 from local benchmarks, and that prediction should be checked against the real thing rather than quoted.
+**What was dropped with the Lambda design and does not need doing:** re-deriving the operating threshold against Titan. Local mpnet keeps the 0.80 threshold and all of Phase 2's eval work valid, so that whole workstream disappeared rather than being deferred.
 
 ## Guardrail note
 
