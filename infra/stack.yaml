@@ -27,20 +27,31 @@ Parameters:
 
   InstanceType:
     Type: String
-    Default: t4g.medium
-    AllowedValues: [t4g.small, t4g.medium, t4g.large]
+    Default: m7i-flex.large
+    # Restricted to free-tier-eligible types on purpose: accounts on the
+    # AWS Free Tier plan are only permitted to launch these, and anything
+    # else fails at create time with "not eligible for Free Tier". Query
+    # the current list with:
+    #   aws ec2 describe-instance-types \
+    #     --filters Name=free-tier-eligible,Values=true
+    AllowedValues: [t3.small, c7i-flex.large, m7i-flex.large]
     Description: >
-      Graviton (ARM), cheaper than x86 for identical work. medium (4 GB) by
-      default because the embedding model's weights, torch's runtime, and
-      the in-RAM graph all share this box. small (2 GB) works but is tight.
+      m7i-flex.large (8 GB) by default. The embedding model's weights
+      (~420 MB), torch's runtime, and the in-RAM graph all share this box,
+      and installing torch alone can spike past 2 GB, so t3.small is tight
+      enough to be a real risk. At demo-level usage the difference is
+      cents: about $1.92/month for 8 GB against $0.42 for 2 GB, if the
+      instance is stopped when idle.
 
   LatestAmi:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
     Description: >
       Resolved at deploy time from SSM rather than hardcoded, so the stack
-      does not pin a stale AMI id. Must stay an arm64 image to match the
-      Graviton instance types above.
+      does not pin a stale AMI id. Must match the architecture of the
+      instance type above: every free-tier-eligible option listed there is
+      x86_64. Switching to a Graviton type (t4g.*) means switching this to
+      the arm64 path as well, or the instance will fail to boot.
 
 Resources:
   CacheTable:
@@ -152,7 +163,7 @@ Resources:
           #!/bin/bash
           set -eux
           dnf update -y
-          dnf install -y python3.11 python3.11-pip git
+          dnf install -y python3.11 python3.11-pip git gcc
           mkdir -p /var/lib/semantic-cache
           chown ec2-user:ec2-user /var/lib/semantic-cache
           cat >/etc/profile.d/semantic-cache.sh <<EOF
