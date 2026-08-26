@@ -406,6 +406,32 @@ Related to section 21 and found in the same pass, but a separate defect worth it
 
 ---
 
+## 23b. Deployed, and what the real numbers turned out to be
+
+Measured on the live stack (`m7i-flex.large`, us-east-1), not projected.
+
+**The stop/start cycle, which is the whole reason for this architecture:**
+
+| stage | measured |
+|---|---|
+| `start-instances` to API answering | **31s** (mostly EC2 boot, not the app) |
+| app startup, first ever boot (rebuild from DynamoDB) | 0.92s at 0 entries |
+| app startup, later boots (reload from EBS snapshot) | **1.6s at 73 entries** |
+| warm request, over the internet | ~85ms |
+| warm request, same box | ~15ms |
+
+The snapshot path did what it was designed to do: `restored_from=dynamodb` on the first boot, then `restored_from=snapshot entries=73` after a stop/start, with the graph written on systemd shutdown. Section 19 predicted ~16.5s to rebuild 10,000 entries from DynamoDB; the snapshot sidesteps that entirely, and the honest caveat is that 73 entries is far too few to have stressed either path. The comparison worth running later is snapshot-vs-rebuild at a few thousand entries.
+
+**Identical similarity scores local and deployed** (0.8838, 0.7266, 0.8211, 0.7683 across the whole test tour). Not a coincidence worth shrugging at: it confirms the embedding model, threshold, and index all behave the same in both places, which is the thing a "works on my machine" deployment usually gets wrong.
+
+**A constraint discovered by hitting it: AWS's Free Tier plan restricts which instance types an account may launch at all.** The first deploy failed at the instance with `The specified instance type is not eligible for Free Tier` and rolled the whole stack back. `t4g.medium` is not eligible. This is worth knowing generally: on a new account, instance type availability is a *plan* restriction, not just a pricing question, and `aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true` is the authoritative list. The eligible set turned out to include `m7i-flex.large` at 8GB, more headroom than the 4GB originally planned, for about 22 cents a month more at demo usage.
+
+**The rollback behaved correctly and is worth noting as a reason to use IaC at all:** four of five resources had already been created when the instance failed, and CloudFormation removed all of them. No orphaned table, role, or security group left billing quietly. Clicking the same setup together in the console would have left every successful piece behind.
+
+**Cost after the full build, deploy, seed, test, and stop/start cycle: $0.00.**
+
+---
+
 ## 24. Debugging story #6: the verification that was measuring the wrong model
 
 **Found while re-running the end-to-end demo after the platform change**, not by looking for it.
