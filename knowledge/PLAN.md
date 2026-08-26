@@ -85,7 +85,9 @@ Everything here exists because storage changed what a bad answer costs. Through 
 
 Everything below is either deployment or blocked on AWS. No local feature work remains: 82 tests pass, and every part of the system except answering a genuinely new question is exercisable on a laptop.
 
-**Ship the current code (nothing blocks this):**
+**Sequencing decision: nothing deploys until Bedrock works.** The instance stays stopped and on old code deliberately. One deploy with a finished system beats several partial ones, and the things only AWS can verify (the instance role's permissions, systemd, real cold-start timing, DynamoDB across a stop/start) are worth checking against final code rather than something about to be replaced. Items 1-3 below are ready whenever item 4 unblocks.
+
+**Ready to ship, gated on Bedrock by choice rather than by dependency:**
 1. **Deploy to the instance.** It is nine commits behind, still running the version that fabricated stub answers and had no seed corpus, reset, spend cap, or demo page. `git pull` plus a service restart.
 2. **Purge the deployed table.** It holds 73 items: the 67 anchors plus six left by testing, and every one still carries `[stub response for: ...]`. Those do not disappear on their own -- they keep being served as hits, which look like success. `scripts/purge_cache.py --yes`, then the service re-seeds the canonical 67 on restart.
 3. **Set `RESET_TOKEN`** in `/etc/systemd/system/semantic-cache.service` so the one-command reset works against the deployed instance. Currently commented out, which leaves the endpoint returning 404.
