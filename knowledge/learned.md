@@ -369,6 +369,25 @@ Related to section 21 and found in the same pass, but a separate defect worth it
 
 ---
 
+## 22b. Open lead: pruning orphans nodes on clustered data, which may be the rest of section 15's recall ceiling
+
+**Not investigated yet, recorded so it isn't lost.** Came up from the question "doesn't HNSW already evict the least-connected entries?"
+
+**What was measured** (2,000 vectors, dim 64, `M=16` so `M_max0=32`):
+
+| data shape | nodes stored | nodes with zero in-edges |
+|---|---|---|
+| uniform random | 2,000 / 2,000 | **0** |
+| 8 tight clusters (sigma 0.05) | 2,000 / 2,000 | **245** |
+
+`_prune()` only rewrites adjacency lists, never `self.vectors`, so a node is never removed from storage. But under heavy clustering, near-identical vectors compete for the same 32 slots and some lose *every* incoming edge. A node nothing points at is unreachable by traversal no matter where a search starts.
+
+**Why this is worth chasing:** `eval/scale_dataset.py` generates its benchmark by perturbing 117 anchors with `sigma=0.018`, which is exactly this clustered shape. Section 15 documented a recall ceiling that was improved but never closed (65.5% at n=50,000) and listed sweeping `ef_upper` and raising `M` as untried levers. Orphaning would cap recall directly and independently of both, and it fits section 15's most puzzling result: recall stayed **flat** across a 32x wider `ef_search`. A wider beam cannot reach a node with no in-edges.
+
+**Explicitly a hypothesis, not a finding.** Section 15's `ef_upper` fix produced a real, measured improvement, so upper-layer routing was genuinely part of the problem. Orphaning would be an additional cause, not a replacement. The test: measure orphan rate on the real eval data, then check whether the queries that fail recall are the ones whose true match is orphaned. Overlap would confirm it.
+
+---
+
 ## 23. Serverless was the wrong shape, and the rejected option said so first
 
 **The decision:** replaced Lambda with a single small EC2 instance (`t4g.medium`) that gets started before a demo and stopped after.
