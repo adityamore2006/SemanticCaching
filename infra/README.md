@@ -142,6 +142,8 @@ The nightly stop is a wall-clock schedule rather than a CPU-idle alarm on purpos
 
 Both IAM roles behind these guards are scoped to `ec2:StopInstances` only. Neither can start anything, so neither can ever cost money.
 
+The auto-stop is **tested, not just configured**: the schedule was temporarily set a few minutes out and the instance stopped itself at exactly that minute with no intervention. An untested safety mechanism is worse than none, because you trust it.
+
 To change the stop time, redeploy with a different `StopHour` (minute and hour, Eastern):
 
 ```bash
@@ -149,6 +151,11 @@ aws cloudformation deploy --template-file infra/stack.yaml --stack-name semantic
   --capabilities CAPABILITY_IAM \
   --parameter-overrides KeyName=semantic-cache MyIp="$(curl -s https://checkip.amazonaws.com)/32" StopHour="30 23"
 ```
+
+**Pass every parameter you care about, every time.** `aws cloudformation deploy` reuses the
+previously-set value for any parameter you omit; it does not fall back to the template
+default. Omitting `StopHour` after setting it once silently keeps the old value, and the
+deploy reports "No changes to deploy" while leaving the schedule wrong.
 
 ## Tearing it all down
 
