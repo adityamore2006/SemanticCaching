@@ -126,11 +126,28 @@ aws ec2 describe-instances --instance-ids <InstanceId> \
 | DynamoDB on-demand | ~$0.00 | ~$0.00 |
 | **Total** | **≈ $2.30/mo** | **≈ $26.10/mo** |
 
-Set a billing alarm before you walk away from this. It is the habit that prevents surprise bills:
+## Spending guards
+
+**AWS has no true hard spending cap.** Nothing refuses to spend past a number. Budgets alert and can trigger actions, but billing data lags by hours, so a budget action is a backstop, not a wall. The protection that actually works is the deterministic auto-stop.
+
+Three layers are deployed:
+
+| Layer | What it does | Reaction time |
+|---|---|---|
+| **Nightly auto-stop** (in `stack.yaml`) | Stops the instance at 3am Eastern every day | Deterministic. Caps a forgotten instance at under 24h, about $2.30 |
+| **Budget action** at $5 | Stops the instance when spend crosses the limit | Hours, because billing data lags |
+| **Email alerts** at 50/80/100% plus a forecast alert | Tells you before and as it happens | Hours |
+
+The nightly stop is a wall-clock schedule rather than a CPU-idle alarm on purpose: one embedding request uses roughly a CPU-second, so even active demoing averages under 5% CPU on 2 vCPUs. An idle alarm would either fire mid-demo or never fire at all. 3am is chosen because nobody demos then, so it cannot interrupt a session.
+
+Both IAM roles behind these guards are scoped to `ec2:StopInstances` only. Neither can start anything, so neither can ever cost money.
+
+To change the stop time, redeploy with a different `StopHour` (minute and hour, Eastern):
 
 ```bash
-aws budgets create-budget --account-id "$(aws sts get-caller-identity --query Account --output text)" \
-  --budget '{"BudgetName":"monthly","BudgetLimit":{"Amount":"10","Unit":"USD"},"TimeUnit":"MONTHLY","BudgetType":"COST"}'
+aws cloudformation deploy --template-file infra/stack.yaml --stack-name semantic-cache \
+  --capabilities CAPABILITY_IAM \
+  --parameter-overrides KeyName=semantic-cache MyIp="$(curl -s https://checkip.amazonaws.com)/32" StopHour="30 23"
 ```
 
 ## Tearing it all down
