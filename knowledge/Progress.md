@@ -56,12 +56,26 @@
 
 **Verified locally:** 51/51 tests pass. The API was run end to end with the real model across two boots, confirming the snapshot round-trips (`restored_from=snapshot`, hit at similarity 1.0 on the second boot) and that a fresh boot with no snapshot and no DynamoDB still works.
 
-### Next steps
+### DEPLOYED (2026-08-26)
 
-1. **Provision AWS resources** (see the setup guide handed over separately): DynamoDB table, IAM role for the instance, security group, and the EC2 instance itself.
-2. **Deploy:** clone, create the venv, install requirements, add a systemd unit for uvicorn, start it.
-3. **Request the Bedrock quota increase** for Claude Haiku 4.5 (`L-CCA5DF70` requests/min, `L-58BE175A` tokens/min, both adjustable and currently 0). Until that clears the miss path uses the Phase 5 stub, which is set automatically when `LLM_MODEL_ID` is unset, so the cache is fully demonstrable without it.
-4. **Measure and record:** time from `start-instances` to first successful response, and warm request latency. Both go in learned.md next to the Lambda cold-start figures they replace, because the comparison is the story.
+Live on AWS and verified end to end, then stopped. Measured numbers in learned.md section 23b.
+
+- **Stack:** `semantic-cache` (CloudFormation). Instance `i-0066a19f7fa7614cb`, `m7i-flex.large`, us-east-1. Table `semantic-cache-CacheTable-1H90CFPXOWNLO`, 67 seeded entries persisted.
+- **Verified:** seeded 67/67 anchors over HTTP, ran the full behaviour tour against the live URL with similarity scores identical to local, then stopped and restarted to confirm the snapshot path (`restored_from=snapshot entries=73`, ready in 1.6s) and that the restored cache still serves hits.
+- **Cost so far: $0.00.** Instance is stopped; only the EBS volume accrues.
+
+**Operating it:**
+```
+aws ec2 start-instances --instance-ids i-0066a19f7fa7614cb
+aws ec2 stop-instances  --instance-ids i-0066a19f7fa7614cb
+```
+The public IP changes on every start. Read it with `aws ec2 describe-instances --instance-ids i-0066a19f7fa7614cb --query 'Reservations[0].Instances[0].PublicIpAddress' --output text`. systemd starts the API automatically on boot, so starting the instance is the only manual step.
+
+### Remaining
+
+1. **Bedrock quota** for Claude Haiku 4.5 (`L-CCA5DF70` requests/min, `L-58BE175A` tokens/min, both adjustable and currently 0). Until it clears, `LLM_MODEL_ID` stays unset and the miss path uses the Phase 5 stub, so everything that makes this a cache is demonstrable without it. Once approved: set `LLM_MODEL_ID` in `/etc/systemd/system/semantic-cache.service`, restart, and re-seed to replace stub answers with real ones.
+2. **Optional, deferred deliberately:** a stable address (Elastic IP, ~$3.65/mo) so the demo URL survives restarts; HTTPS via Caddy; and the CloudWatch dashboard. None are needed to demo.
+3. **Open lead, not blocking:** the orphaned-node hypothesis in learned.md section 22b, which may explain the remaining half of section 15's recall ceiling.
 
 ---
 
