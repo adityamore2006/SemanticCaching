@@ -63,7 +63,7 @@ Goal: wire the index into the actual cache decision logic (hit -> return stored 
 
 ## Phase 7: making the miss path safe, and a demo surface
 
-Everything here exists because switching the LLM from a stub to real Bedrock turns several harmless things into real ones.
+Everything here exists because storage changed what a bad answer costs. Through Phase 5 the miss path called a stub and nothing persisted, so a wrong or missing answer was thrown away. Once entries are written down and replayed, a single bad answer becomes permanent.
 
 **Never cache a bad answer.** An LLM that *raises* was always safe, since `route()` writes nothing on an exception. The hole was an LLM that returns successfully with unusable content: an empty string is not `None`, so it passed the orphan check and would be served as a confident HIT to every future paraphrase, permanently. `BedrockLLM` now raises on a refusal, on a `max_tokens` truncation (a half-finished answer looks fine and would be replayed forever), and on empty text. `CacheRouter` independently rejects a falsy or whitespace-only response, because `llm` is caller-supplied and the router should not trust it. Same principle as refusing to serve a `None` found in the store (learned.md section 21).
 
@@ -71,17 +71,43 @@ Everything here exists because switching the LLM from a stub to real Bedrock tur
 
 **A daily ceiling on LLM calls** (`src/usage_limiter.py`). The API is deliberately public so the demo URL always works, and every miss costs a real Bedrock call, so a stranger sending novel queries spends real money. The counter lives in DynamoDB rather than memory: an in-memory count resets on restart, so anyone who could restart the process could clear the cap. Its row carries no `vector` attribute, which is what makes it invisible to `all_items()` and therefore to the cold-start rebuild. This is the innermost of three cost layers, bounding spend *before* it happens rather than hours later when billing data catches up (learned.md section 23c).
 
-**Purge before switching on Bedrock** (`scripts/purge_cache.py`). Entries written while the stub was active hold `[stub response for: ...]`, and they do not disappear when the real model arrives -- they keep being served as hits, which look like success. Purge, restart, re-seed.
+**The stub was removed outright, not improved.** `llm` is now a required argument with no default, joining `index_kind` and `embedder` for the same reason: too load-bearing to assume. A miss with no model configured returns **501** rather than placeholder text. The old default cached its stub and then served it back as a confident hit, so the cache accumulated answers nothing had ever answered. Third instance of the same shape in this project (learned.md section 23e): a default that was harmless in one phase became a defect in the next, silently.
+
+**A curated starter corpus** (`data/seed_answers.json`): 67 real answers for the collision-verified anchors, seeded automatically when the cache comes up empty. The cache is fully demonstrable with no model at all -- hits, rewordings, and refused near-misses all work -- because the only operation needing a model is answering something genuinely new. Entries carry a `source` field (`seed` or `llm`), without which a plausible curated answer is indistinguishable from a generated one, and a purge cannot avoid deleting answers that were paid for.
+
+**One-command reset** (`scripts/reset_cache.py` -> `POST /admin/reset`). Reset lives in the service because the in-memory index is what actually needs clearing and only the process holds it; purging storage from outside leaves the running index serving entries that no longer exist. It clears the store, **deletes the on-disk snapshot** (skipping that is the silent failure: the reset looks fine until a restart reloads the old graph), rebuilds, and re-seeds. Guarded by `RESET_TOKEN` and disabled entirely when unset. `scripts/purge_cache.py` remains for the one-off cleanup of entries written before this existed.
 
 **A demo page served by FastAPI** (`src/static/index.html` at `/`), showing hit/miss, similarity against the threshold, latency, and a running count of model calls avoided.
 
 **S3 + CloudFront was considered and rejected** for that page, on the same grounds as OpenSearch Serverless (section 16), provisioned concurrency (section 19), and Lambda (section 23): a service has to earn its place. The page is useless without this backend, so splitting them across origins buys CORS configuration and a page that loads but errors whenever the instance is stopped, which is most of the time by design. It also demonstrates nothing the existing stack does not already cover.
 
+## What is left
+
+Everything below is either deployment or blocked on AWS. No local feature work remains: 82 tests pass, and every part of the system except answering a genuinely new question is exercisable on a laptop.
+
+**Ship the current code (nothing blocks this):**
+1. **Deploy to the instance.** It is nine commits behind, still running the version that fabricated stub answers and had no seed corpus, reset, spend cap, or demo page. `git pull` plus a service restart.
+2. **Purge the deployed table.** It holds 73 items: the 67 anchors plus six left by testing, and every one still carries `[stub response for: ...]`. Those do not disappear on their own -- they keep being served as hits, which look like success. `scripts/purge_cache.py --yes`, then the service re-seeds the canonical 67 on restart.
+3. **Set `RESET_TOKEN`** in `/etc/systemd/system/semantic-cache.service` so the one-command reset works against the deployed instance. Currently commented out, which leaves the endpoint returning 404.
+
+**Blocked on AWS, not on us:**
+4. **Bedrock quota.** `L-CCA5DF70` and `L-58BE175A` (Claude Haiku 4.5 requests and tokens per minute) are both adjustable and still read **0**. Until they are granted, a miss returns 501 by design. Once granted: set `LLM_MODEL_ID`, restart, reset, and let the miss path produce real answers. The daily cap in `usage_limiter.py` becomes active at the same moment.
+
+**Small cleanup, no urgency:**
+5. **The local snapshot is written but never read.** `build_router()` loads a snapshot only when a durable store is configured, but the shutdown handler writes one unconditionally. Locally that means ~200KB of dead I/O on every stop, and a file on disk that looks meaningful and is not.
+
+**Deliberately not doing** (recorded so they are decisions rather than omissions):
+- **Cache eviction / LRU** -- learned.md section 22b. At the measured 1k-10k range nothing is under memory pressure, and HNSW cannot delete in place, so this is real work against a problem the measurements say does not exist.
+- **CloudWatch dashboard** -- `/stats` and the demo page already report hit rate, entry count, and calls avoided. A dashboard would be a second implementation of the same numbers.
+- **S3 + CloudFront** for the frontend -- see Phase 7.
+
+**One open lead worth chasing eventually:** learned.md section 22b found that HNSW's edge pruning orphans nodes on clustered data (245 of 2,000 with zero in-edges), and the eval benchmark generates exactly that shape. It may explain the remaining half of section 15's unclosed recall ceiling, and would explain why recall stayed flat across a 32x wider `ef_search`. Recorded as a hypothesis with the test that would confirm it, not as a finding.
+
 ## Where we are right now
 
 Phase 1 through Phase 5 are complete. Linear search and HNSW are both built, tested, and benchmarked against each other at a realistic 1k-10k scale (two real bugs found and fixed along the way: an O(n^2) insert bug and an unrecoverable upper-layer routing bug, see `knowledge/learned.md`). `src/cache_router.py` wires embedding, index, and storage into the real hit/miss decision.
 
-Phase 6's application code is built and green (51 tests): `src/api.py` (FastAPI), `src/dynamodb_cache_store.py`, `src/bedrock_llm.py`, graph snapshot save/load, and a swappable embedder interface. Four more real bugs were found and fixed while building it, three of which would have shipped silently -- see learned.md sections 21, 22, and 24. What remains is provisioning the actual AWS resources (EC2 instance, IAM role, DynamoDB table) and deploying, plus a Bedrock quota increase for the miss-path LLM call. See `Progress.md` for the exact next steps.
+Phases 6 and 7's application code is built and green (82 tests): FastAPI, DynamoDB storage, graph snapshotting, a swappable embedder, a curated seed corpus, spend caps, a demo page, and a one-command reset. Nine real bugs were found and fixed along the way, most of which would have shipped silently -- see learned.md sections 21, 22, 23c, 23d, 23e, and 24. The stack is deployed on AWS but the instance is stopped and running older code. See "What is left" above for the exact remaining steps.
 
 ## Agent usage guardrails
 
