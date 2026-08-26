@@ -432,6 +432,34 @@ The snapshot path did what it was designed to do: `restored_from=dynamodb` on th
 
 ---
 
+## 23c. Cost guardrails, and three ways they can quietly not work
+
+The deployed instance is $0.096/hr, so the real risk was never the rate, it was leaving it running by accident: about $70 over a forgotten month. Worth writing up because the interesting part is not the config, it's the three separate ways this nearly ended up as protection that only *looked* like protection.
+
+**Start from the honest constraint: AWS has no hard spending cap.** Nothing refuses to spend past a number. Budgets alert and can trigger actions, but billing data lags by hours. Anyone describing a budget as a spending limit is describing something AWS does not offer. That constraint is what forces a layered answer rather than one setting.
+
+| layer | mechanism | reaction time |
+|---|---|---|
+| nightly auto-stop | EventBridge schedule, 3am ET | deterministic, caps a forgotten instance at <24h (~$2.30) |
+| budget action | stops EC2 at $5 | hours (billing lag) |
+| budget alerts | email at 50/80/100% + forecast | hours |
+
+Only the first is deterministic. The others are backstops for spend that isn't the instance.
+
+**Wall-clock over a CPU-idle alarm, and the reasoning generalizes.** The obvious design is "stop it when it looks idle." But one embedding request costs roughly a CPU-second, so even active demoing averages under 5% CPU across 2 vCPUs. An idle-detection threshold would either fire in the middle of a demo or never fire at all, and there's no value that reliably separates the two. A wall-clock schedule has no such ambiguity, and 3am is a time nobody demos, so it cannot interrupt a session. **The lesson: when a signal cannot distinguish the two states you care about, stop tuning the threshold and pick a different signal.**
+
+**Failure mode 1: a CloudFormation output made the stack un-updatable.** The template output the instance's `PublicIp` via `!GetAtt`. A stopped instance has no public IP, so the attribute fails to resolve and rolls back *the entire update*. Every attempt to add the guards failed on this, with an error naming the output rather than anything to do with the change being made. The output was also wrong on its own terms: the IP changes on every start, so an output holding one is stale immediately. Removed both it and the `ApiUrl` derived from it. **Generalizes to: don't put ephemeral attributes in outputs. They are read at every update, including updates made while the resource is in a state where the attribute does not exist.**
+
+**Failure mode 2: "No changes to deploy" while the change silently didn't happen.** After testing the schedule at a near-future time, redeploying *without* `StopHour` reported `No changes to deploy` and kept the test value. `aws cloudformation deploy` reuses previously-set parameter values for anything omitted rather than falling back to the template default. Trusting that message would have left the auto-stop firing at 3:55pm daily, in the middle of exactly when a demo happens. **A success message describing a no-op is indistinguishable from a success message describing the change you wanted, unless you check the resulting state.** Same shape as section 6's aggregate metric problem, one layer up.
+
+**Failure mode 3, avoided: an untested safety mechanism.** A guard you have not fired is not a guard, it is a belief. Tested it properly: started the instance, set the schedule a few minutes out, and watched it stop itself at 15:55:17 against a 15:55 schedule with no intervention. That test is also what surfaced failure mode 2, since restoring the real time is when the parameter-reuse behaviour appeared. **Testing the guard found a bug in the guard.**
+
+**Both IAM roles behind the guards are scoped to `ec2:StopInstances` only.** Neither can start anything, so the worst a bug in either can do is stop the instance early. A guard that can only ever reduce spend is a guard that needs much less scrutiny than one that could increase it.
+
+**Talking point:** "The protection I shipped is a wall-clock auto-stop, not an idle detector, because on this workload CPU can't tell 'in use' from 'forgotten'. And I only trust it because I fired it deliberately, which is how I found that CloudFormation had silently kept my test value while reporting no changes."
+
+---
+
 ## 24. Debugging story #6: the verification that was measuring the wrong model
 
 **Found while re-running the end-to-end demo after the platform change**, not by looking for it.

@@ -64,6 +64,10 @@ Live on AWS and verified end to end, then stopped. Measured numbers in learned.m
 - **Verified:** seeded 67/67 anchors over HTTP, ran the full behaviour tour against the live URL with similarity scores identical to local, then stopped and restarted to confirm the snapshot path (`restored_from=snapshot entries=73`, ready in 1.6s) and that the restored cache still serves hits.
 - **Cost so far: $0.00.** Instance is stopped; only the EBS volume accrues.
 
+**Spending guards (deployed and tested, learned.md section 23c):** a nightly EventBridge schedule stops the instance at 3am ET, a $5 budget action stops it if spend crosses, and the budget emails at 50/80/100% plus a forecast alert. The schedule was fired deliberately to confirm it works rather than assumed; that test is what caught `cloudformation deploy` silently reusing a previously-set parameter while reporting "No changes to deploy". Both guard roles are scoped to `ec2:StopInstances` only, so neither can ever cost money. Worst case for a forgotten instance is about $2.30.
+
+**Console locations:** EventBridge > Scheduler > Schedules for the auto-stop (not Rules, which is the older mechanism and will be empty); Billing and Cost Management > Budgets for the limit, alerts, and the action; CloudFormation > semantic-cache > Resources for everything at once. Change things through the template, not the console: a hand edit gets silently reverted by the next deploy.
+
 **Operating it:**
 ```
 aws ec2 start-instances --instance-ids i-0066a19f7fa7614cb
