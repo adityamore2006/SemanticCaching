@@ -58,6 +58,14 @@ ID_PREFIX = "q_"
 SNAPSHOT_VERSION = 1
 
 
+class EmptyLLMResponse(RuntimeError):
+    """The LLM callable returned nothing usable.
+
+    Raised instead of caching, because a cached empty answer is served as a
+    confident HIT to every future paraphrase.
+    """
+
+
 def call_llm(query: str) -> str:
     """Phase 5 stub -- deterministic, free, fast to test. Real Bedrock
     wiring is Phase 6, deliberately kept out of this file until then."""
@@ -130,6 +138,20 @@ class CacheRouter:
         # Miss: the index was empty, the best match didn't clear the
         # threshold, or it cleared it but had no stored response.
         response = self.llm(query)
+
+        # `llm` is a caller-supplied callable, so the router validates what
+        # comes back rather than trusting it. An empty or whitespace-only
+        # answer is not a minor quality issue here: it gets written to the
+        # store and, because it is not None, passes the orphan check above
+        # on every future query, so one bad answer becomes a permanent
+        # empty HIT. Same principle as refusing to serve a None found in
+        # the store (knowledge/learned.md section 21) -- fail loudly at the
+        # boundary instead of persisting something unusable.
+        if not response or not str(response).strip():
+            raise EmptyLLMResponse(
+                "llm returned an empty response; refusing to cache it"
+            )
+
         if matched_id is not None and similarity is not None and similarity >= self.threshold:
             # Heal the orphaned entry under its existing id instead of
             # minting a new one. The index already holds a vector for this

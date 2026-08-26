@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Semantic Cache</title>
+<style>
+  :root {
+    --ground: #f5f7f9;
+    --surface: #ffffff;
+    --surface-alt: #eceff3;
+    --ink: #151c23;
+    --ink-soft: #43515f;
+    --muted: #6a7887;
+    --rule: #d5dce3;
+    --hit: #1c7a54;
+    --hit-bg: #dff2e8;
+    --miss: #a8571b;
+    --miss-bg: #fbecdb;
+    --err: #a3302f;
+    --err-bg: #fbe4e3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #10151a; --surface: #171e25; --surface-alt: #1f2831;
+      --ink: #e5ebf1; --ink-soft: #b3c0cc; --muted: #8395a5; --rule: #2c3742;
+      --hit: #64ceA0; --hit-bg: #14301f; --miss: #e2a35c; --miss-bg: #33261a;
+      --err: #e78482; --err-bg: #35201f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font: 16px/1.6 ui-serif, Georgia, serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 2.5rem 1.25rem 5rem; }
+  h1 {
+    font-family: ui-sans-serif, system-ui, sans-serif;
+    font-size: 1.75rem; font-weight: 650; letter-spacing: -.02em; margin: 0 0 .4rem;
+  }
+  .sub { color: var(--ink-soft); margin: 0 0 1.75rem; }
+  form { display: flex; gap: .6rem; margin-bottom: 1rem; }
+  input[type=text] {
+    flex: 1; padding: .7rem .85rem; font: inherit; font-size: .95rem;
+    background: var(--surface); color: var(--ink);
+    border: 1px solid var(--rule); border-radius: 5px;
+  }
+  input[type=text]:focus { outline: 2px solid var(--ink-soft); outline-offset: 1px; }
+  button {
+    font-family: ui-sans-serif, system-ui, sans-serif; font-weight: 600; font-size: .9rem;
+    padding: .7rem 1.2rem; border: 1px solid var(--ink); border-radius: 5px;
+    background: var(--ink); color: var(--ground); cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+  .examples {
+    font-family: ui-sans-serif, system-ui, sans-serif; font-size: .8rem;
+    color: var(--muted); margin-bottom: 2rem;
+    display: flex; flex-wrap: wrap; gap: .4rem; align-items: baseline;
+  }
+  .examples button {
+    background: var(--surface-alt); color: var(--ink-soft);
+    border: 1px solid var(--rule); padding: .25rem .55rem;
+    border-radius: 4px; font-size: .78rem; font-weight: 500;
+  }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px,1fr)); gap: .75rem; margin-bottom: 2rem; }
+  .tile {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-radius: 6px; padding: .8rem .9rem;
+  }
+  .tile .label {
+    font-family: ui-sans-serif, system-ui, sans-serif; font-size: .68rem;
+    letter-spacing: .09em; text-transform: uppercase; color: var(--muted);
+  }
+  .tile .value {
+    font-family: ui-monospace, monospace; font-size: 1.4rem;
+    font-variant-numeric: tabular-nums; margin-top: .2rem;
+  }
+  .result {
+    background: var(--surface); border: 1px solid var(--rule);
+    border-left-width: 4px; border-radius: 0 6px 6px 0;
+    padding: 1rem 1.1rem; margin-bottom: .85rem;
+  }
+  .result.hit { border-left-color: var(--hit); }
+  .result.miss { border-left-color: var(--miss); }
+  .result.err { border-left-color: var(--err); }
+  .verdict {
+    font-family: ui-sans-serif, system-ui, sans-serif; font-weight: 700;
+    font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+    padding: .15em .45em; border-radius: 3px; margin-right: .5rem;
+  }
+  .hit .verdict { background: var(--hit-bg); color: var(--hit); }
+  .miss .verdict { background: var(--miss-bg); color: var(--miss); }
+  .err .verdict { background: var(--err-bg); color: var(--err); }
+  .q { font-weight: 500; }
+  .meta {
+    font-family: ui-monospace, monospace; font-size: .78rem; color: var(--muted);
+    margin-top: .5rem; display: flex; flex-wrap: wrap; gap: .9rem;
+  }
+  .answer {
+    margin-top: .7rem; padding-top: .7rem; border-top: 1px solid var(--rule);
+    color: var(--ink-soft); font-size: .93rem;
+  }
+  .bar {
+    height: 4px; background: var(--surface-alt); border-radius: 2px;
+    margin-top: .5rem; position: relative; overflow: hidden;
+  }
+  .bar i { position: absolute; inset: 0 auto 0 0; background: var(--muted); }
+  .bar .mark { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--ink); }
+  footer {
+    margin-top: 2.5rem; padding-top: 1.25rem; border-top: 1px solid var(--rule);
+    font-size: .85rem; color: var(--muted);
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Semantic Cache</h1>
+  <p class="sub">
+    Ask something. If it <em>means</em> the same as a question already answered, the stored
+    answer comes back with no model call. If not, it is answered fresh and remembered.
+  </p>
+
+  <form id="f">
+    <input type="text" id="q" placeholder="How do I merge my accounts?" autocomplete="off" required maxlength="2000">
+    <button type="submit" id="go">Ask</button>
+  </form>
+
+  <div class="examples">
+    <span>Try:</span>
+    <button type="button" data-q="Can I merge two accounts into one?">a cached question</button>
+    <button type="button" data-q="Is it possible to combine my two separate accounts?">a rewording of it</button>
+    <button type="button" data-q="Can I delete one of my two accounts?">a near-miss</button>
+    <button type="button" data-q="What's the weather in Chapel Hill?">something unrelated</button>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><div class="label">Cached</div><div class="value" id="entries">–</div></div>
+    <div class="tile"><div class="label">Hit rate</div><div class="value" id="rate">–</div></div>
+    <div class="tile"><div class="label">Calls avoided</div><div class="value" id="avoided">–</div></div>
+    <div class="tile"><div class="label">Threshold</div><div class="value" id="thr">–</div></div>
+  </div>
+
+  <div id="out"></div>
+
+  <footer>
+    A hit means the model was never called. The threshold is deliberately strict, so genuine
+    rewordings sometimes miss: serving a confidently wrong answer costs more than paying for
+    one extra call.
+  </footer>
+</div>
+
+<script>
+const out = document.getElementById("out");
+const form = document.getElementById("f");
+const input = document.getElementById("q");
+const go = document.getElementById("go");
+let threshold = 0.8;
+
+const esc = s => String(s).replace(/[&<>"']/g, c =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+async function stats() {
+  try {
+    const s = await (await fetch("/stats")).json();
+    document.getElementById("entries").textContent = s.entries ?? "–";
+    document.getElementById("rate").textContent =
+      s.hit_rate === null || s.hit_rate === undefined ? "–" : (s.hit_rate * 100).toFixed(0) + "%";
+    // Every hit is one model call that provably did not happen. That is
+    // the project's cost claim, counted rather than estimated.
+    document.getElementById("avoided").textContent = s.hits ?? "–";
+    if (s.threshold) { threshold = s.threshold; document.getElementById("thr").textContent = s.threshold; }
+  } catch (e) { /* stats are decoration; a failure here must not break asking */ }
+}
+
+function render(query, data, error) {
+  const div = document.createElement("div");
+  if (error) {
+    div.className = "result err";
+    div.innerHTML = `<span class="verdict">Error</span><span class="q">${esc(query)}</span>
+      <div class="answer">${esc(error)}</div>`;
+  } else {
+    const kind = data.hit ? "hit" : "miss";
+    const sim = data.similarity === null ? null : data.similarity;
+    // The bar shows how close the best match came, with a tick at the
+    // threshold, so a near-miss reads as "how close" rather than just "no".
+    const bar = sim === null ? "" : `
+      <div class="bar">
+        <i style="width:${Math.max(0, Math.min(1, sim)) * 100}%"></i>
+        <span class="mark" style="left:${threshold * 100}%"></span>
+      </div>`;
+    div.className = "result " + kind;
+    div.innerHTML = `
+      <span class="verdict">${data.hit ? "Hit" : "Miss"}</span><span class="q">${esc(query)}</span>
+      <div class="meta">
+        <span>similarity ${sim === null ? "n/a" : sim.toFixed(4)}</span>
+        <span>threshold ${threshold}</span>
+        <span>${data.latency_ms} ms</span>
+        <span>${data.hit ? "no model call" : "model called"}</span>
+      </div>${bar}
+      <div class="answer">${esc(data.response)}</div>`;
+  }
+  out.prepend(div);
+}
+
+async function ask(query) {
+  go.disabled = true;
+  try {
+    const r = await fetch("/query", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) render(query, null, body.detail || `request failed (${r.status})`);
+    else render(query, body);
+  } catch (e) {
+    render(query, null, "could not reach the server");
+  } finally {
+    go.disabled = false;
+    stats();
+  }
+}
+
+form.addEventListener("submit", e => {
+  e.preventDefault();
+  const q = input.value.trim();
+  if (q) { ask(q); input.value = ""; }
+});
+
+document.querySelectorAll(".examples button").forEach(b =>
+  b.addEventListener("click", () => ask(b.dataset.q)));
+
+stats();
+</script>
+</body>
+</html>

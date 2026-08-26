@@ -38,6 +38,16 @@ SYSTEM_PROMPT = (
 )
 
 
+class LLMResponseError(RuntimeError):
+    """The model answered, but with something not safe to cache.
+
+    Distinct from the transport errors boto3 and the SDK already raise
+    (throttling, auth, network). Those mean the call failed. This means the
+    call succeeded and the *content* is unusable, which is easier to miss
+    and worse to cache, since it looks like a normal answer.
+    """
+
+
 class BedrockLLM:
     """Callable that answers a query via Claude on Bedrock.
 
@@ -67,6 +77,30 @@ class BedrockLLM:
             system=SYSTEM_PROMPT,
             messages=[{"role": "user", "content": query}],
         )
-        return "".join(
+
+        # Raise rather than return a degraded answer. This is the important
+        # part and it is not defensive noise: whatever comes back here gets
+        # written to the cache and replayed verbatim on every future
+        # paraphrase, so a bad answer is not one bad response, it is a bad
+        # response served indefinitely with no failure signal. Raising is
+        # the right channel because CacheRouter.route() calls this before
+        # it writes anything, so an exception leaves the cache untouched.
+        if response.stop_reason == "refusal":
+            raise LLMResponseError("model declined to answer")
+
+        # Truncation is the subtle one. A max_tokens cut-off still returns
+        # HTTP 200 with real, useful-looking text -- it just stops
+        # mid-sentence. Caching that means serving a half-finished answer
+        # forever, and nothing downstream can tell it apart from a
+        # complete one.
+        if response.stop_reason == "max_tokens":
+            raise LLMResponseError(
+                f"answer hit the {self.max_tokens}-token limit and would be truncated"
+            )
+
+        text = "".join(
             block.text for block in response.content if block.type == "text"
         )
+        if not text.strip():
+            raise LLMResponseError("model returned no text")
+        return text
