@@ -138,3 +138,52 @@ def test_dynamo_all_items_and_len_follow_scan_pagination(dynamo_store):
     assert len(items) == 60
     assert {item[0] for item in items} == {f"q_{i}" for i in range(60)}
     assert len(dynamo_store) == 60
+
+
+# --- clear(): the reset primitive ---
+
+
+def test_in_memory_clear_empties_and_reports_the_count():
+    store = InMemoryCacheStore()
+    store.put("a", "r1")
+    store.put("b", "r2")
+
+    assert store.clear() == 2
+    assert len(store) == 0
+    assert store.get("a") is None
+
+
+def test_dynamo_clear_removes_cache_entries(dynamo_store):
+    for i in range(5):
+        dynamo_store.put(f"q_{i}", f"answer {i}", np.array([1.0, 0.0], dtype=np.float32))
+
+    assert dynamo_store.clear() == 5
+    assert len(dynamo_store) == 0
+    assert list(dynamo_store.all_items()) == []
+
+
+def test_dynamo_clear_preserves_reserved_rows(dynamo_store):
+    # The daily LLM-call counter shares this table. Resetting the cache
+    # before a demo must not silently reset a spend guard along with it.
+    from usage_limiter import UsageLimiter
+
+    dynamo_store.put("q_0", "an answer", np.array([1.0, 0.0], dtype=np.float32))
+    limiter = UsageLimiter(dynamo_store.table, limit=100)
+    limiter.record()
+    limiter.record()
+
+    removed = dynamo_store.clear()
+
+    assert removed == 1              # only the cache entry
+    assert limiter.count() == 2      # the counter survived
+    assert len(dynamo_store) == 1    # the reserved row is still there
+
+
+def test_dynamo_clear_handles_pagination(dynamo_store):
+    rng = np.random.default_rng(0)
+    for i in range(60):
+        dynamo_store.put(f"q_{i}", f"answer {i}", rng.random(1024).astype(np.float32))
+    assert "LastEvaluatedKey" in dynamo_store.table.scan()  # guard the premise
+
+    assert dynamo_store.clear() == 60
+    assert len(dynamo_store) == 0
