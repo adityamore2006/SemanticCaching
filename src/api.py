@@ -35,7 +35,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from cache_router import CacheRouter, EmptyLLMResponse, OPERATING_THRESHOLD
+from cache_router import (
+    CacheRouter,
+    EmptyLLMResponse,
+    LLMNotConfigured,
+    OPERATING_THRESHOLD,
+)
 from local_embedder import SentenceTransformerEmbedder
 from usage_limiter import DailyLimitReached, UsageLimiter
 
@@ -83,12 +88,30 @@ def _build_store():
     return DynamoDBCacheStore(CACHE_TABLE_NAME), True
 
 
+def _refuse(query: str) -> str:
+    """Stands in for the model when none is configured.
+
+    Refuses rather than returning placeholder text. Returning a stub here
+    is what made a miss cache "[stub response for: ...]" and then serve it
+    back as a confident HIT on the next identical question, filling the
+    cache with answers that were never answered.
+
+    The cache is still fully demonstrable without a model: the seeded
+    corpus serves real hits, and near-misses are still correctly refused.
+    The only thing that stops working is answering something genuinely new,
+    which is exactly the operation that needs a model.
+    """
+    raise LLMNotConfigured(
+        "no model is configured, so this question cannot be answered or cached; "
+        "questions already in the cache still work"
+    )
+
+
 def _build_llm():
-    """The real Bedrock call when configured; otherwise the Phase 5 stub,
-    so the cache is fully demonstrable without Bedrock access. Returns
-    None to mean 'use CacheRouter's default stub'."""
+    """The real Bedrock call when configured, otherwise a callable that
+    refuses. Never a placeholder."""
     if not LLM_MODEL_ID:
-        return None
+        return _refuse
     from bedrock_llm import BedrockLLM
     return BedrockLLM(model=LLM_MODEL_ID)
 
@@ -100,17 +123,17 @@ def build_router():
     store, durable = _build_store()
     llm = _build_llm()
 
-    kwargs = {"cache_store": store, "threshold": THRESHOLD}
-    if llm is not None:
-        # Only meaningful with a durable store, since the counter lives in
-        # the same table. Without one there is no real LLM configured
-        # either, so there is nothing to cap.
-        if durable:
-            limiter = UsageLimiter(store.table)
-            state["limiter"] = limiter
-            llm = limiter.wrap(llm)
-        kwargs["llm"] = llm
-    router = CacheRouter("hnsw", embedder=embedder, **kwargs)
+    # Only cap a real model. Wrapping the refusing placeholder would count
+    # calls that never happen and burn the day's allowance on requests that
+    # cost nothing.
+    if durable and LLM_MODEL_ID:
+        limiter = UsageLimiter(store.table)
+        state["limiter"] = limiter
+        llm = limiter.wrap(llm)
+
+    router = CacheRouter(
+        "hnsw", embedder=embedder, llm=llm, cache_store=store, threshold=THRESHOLD
+    )
 
     # The snapshot only holds the index. Responses live in the store, so
     # restoring one without the other leaves ids in the graph that have no
@@ -210,6 +233,10 @@ def query(request: QueryRequest):
         # hits keep working while this is in effect, since they never
         # touch the LLM.
         raise HTTPException(status_code=429, detail=str(exc))
+    except LLMNotConfigured as exc:
+        # 501, not 503: the service is healthy and cached questions still
+        # work. What is missing is a capability, not availability.
+        raise HTTPException(status_code=501, detail=str(exc))
     except EmptyLLMResponse as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:

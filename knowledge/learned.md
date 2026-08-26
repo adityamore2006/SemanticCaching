@@ -480,6 +480,45 @@ Found while auditing the miss path before switching the LLM from a stub to real 
 
 ---
 
+## 23e. The stub was a fabricated answer, and a cache makes fabrications permanent
+
+Caught by using the demo rather than reading the code. Asking something not in the cache
+returned a MISS, and asking the *same thing again* returned a HIT at similarity 1.0 -- serving
+back `[stub response for: ...]` as though it were an answer.
+
+**The cause was a default, not a bug in the routing.** `CacheRouter.__init__` had
+`llm: Callable = call_llm`, a Phase 5 stub returning placeholder text. That was correct while
+nothing persisted: the stub let the routing logic be built and tested for free, which was the
+whole point of the sequencing decision in section 16. It became wrong the moment storage
+existed, and nothing announced the transition. A miss cached the placeholder, and the next
+identical question found it and served it.
+
+**The general shape, and it is the third instance in this project:** a default that is
+harmless in one phase silently becomes a defect in the next. Section 24 was the embedding
+model defaulting to MiniLM after the threshold moved to mpnet. Section 21 was `or` substituting
+an in-memory store once a real one could legitimately be empty. Each was a sensible default
+that outlived the conditions that made it sensible.
+
+**Fixed by removing the default entirely.** `llm` is now required, joining `index_kind` and
+`embedder` for the same reason: these are choices too load-bearing to be assumed. Constructing
+a router without one raises `TypeError` immediately rather than fabricating quietly. When no
+model is configured the deployed service passes a callable that raises `LLMNotConfigured`, and
+the API answers `501` -- not `503`, because the service is healthy and cached questions still
+work; what is missing is a capability, not availability.
+
+**What this costs, stated honestly:** without a model the system can no longer answer anything
+new. That is the correct behaviour rather than a limitation to work around. Every part that
+makes this a cache still demonstrates: the seeded corpus serves real hits, rewordings still
+match, and near-misses are still refused. The one operation that stops is the one that
+genuinely requires a model.
+
+**Talking point:** "A stub is a fabricated answer. In a normal service that is fine, because it
+is thrown away. In a cache it is written down and replayed, so the placeholder becomes a
+permanent answer to a question nobody ever answered. I removed the default rather than making
+it smarter, because the failure was that a default existed at all for something that important."
+
+---
+
 ## 24. Debugging story #6: the verification that was measuring the wrong model
 
 **Found while re-running the end-to-end demo after the platform change**, not by looking for it.
