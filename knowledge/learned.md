@@ -283,15 +283,13 @@ The canonical comparison table, both indexes on the identical dataset, `all-mpne
 
 **The LLM call is a stub (`call_llm`), deliberately, matching the sequencing already decided in section 16.** `llm` is a constructor parameter specifically so swapping in real Bedrock later is passing a different callable, not touching the routing logic at all.
 
-**Verified end-to-end with the real embedding model, not just unit tests:**
+**Verified end-to-end with the real embedding model, not just unit tests.** The numbers originally recorded here (`0.8260` for the paraphrase, `0.0991` for the unrelated query) turned out to be measured on the *wrong model* and have been corrected in section 24 -- the demo was silently running `all-MiniLM-L6-v2` while the threshold it was being checked against came from `all-mpnet-base-v2`. The current, correct demo output is:
 
 ```
-MISS  sim=n/a     'How do I reset my password?'
-HIT   sim=0.8260  'I forgot my password, how do I get back into my account?'
-MISS  sim=0.0991  'Does this integrate with Slack?'
-```
-
-The paraphrase hit at `0.826`, comfortably above the locked `0.80` threshold; the unrelated query missed at `0.099`, nowhere close. Unit tests (`tests/test_cache_router.py`) use a small `FakeEmbedder` with hand-picked, exactly-computed cosine similarities (e.g. `[0.9, sqrt(1-0.9^2)]` gives exactly `0.9` similarity to `[1,0]`) instead of the real model, matching the same fast, dependency-free testing philosophy already established for the index contract tests -- real-model verification and unit-test correctness are two separate, deliberate checks, not one relied on to cover the other.
+MISS  sim=n/a     'Can I merge two accounts into one?'
+HIT   sim=0.9404  'Is it possible to combine my two separate accounts?'
+MISS  sim=0.1019  'Does this integrate with Slack?'
+``` Unit tests (`tests/test_cache_router.py`) use a small `FakeEmbedder` with hand-picked, exactly-computed cosine similarities (e.g. `[0.9, sqrt(1-0.9^2)]` gives exactly `0.9` similarity to `[1,0]`) instead of the real model, matching the same fast, dependency-free testing philosophy already established for the index contract tests -- real-model verification and unit-test correctness are two separate, deliberate checks, not one relied on to cover the other.
 
 **Talking point:** "Before adding a new component, I checked whether it would contradict a design decision I'd already written down and defended, found one that did, quietly, and removed it rather than build the new piece on top of an inconsistency."
 
@@ -368,5 +366,50 @@ Related to section 21 and found in the same pass, but a separate defect worth it
 **The fix, and where it belongs:** `CacheRouter.restore()` replays the vectors and advances the counter past the highest restored id. The first draft had the Lambda handler do this, reaching into `router._next_id` and parsing the `"q_<n>"` format itself. That put knowledge of the id format in two places and made the deployment layer responsible for an invariant of the router. Moving it onto the router keeps the format in one place and makes the rule enforceable by the component that owns it.
 
 **Talking point:** "The threshold work protects against semantically wrong matches. This was an exactly-wrong match, similarity 1.0, caused by bookkeeping rather than embeddings, and no threshold tuning would ever have caught it. Same user-visible failure, completely different cause, which is why I fixed it at the layer that owns id generation instead of at the call site that noticed it."
+
+---
+
+## 23. Serverless was the wrong shape, and the rejected option said so first
+
+**The decision:** replaced Lambda with a single small EC2 instance (`t4g.medium`) that gets started before a demo and stopped after.
+
+**What made Lambda wrong here specifically, stated as a property of this workload rather than a general complaint:** Lambda's cold start is not a one-time boot cost, it is a *recurring, externally-scheduled* one. AWS recycles idle containers whenever it likes, so a pause in a conversation can put a multi-second stall on the very next request. Most workloads absorb that. A cache cannot: its entire pitch is that it answers faster than the thing it is caching, and an unpredictable multi-second stall is the one failure mode that invalidates the pitch. This system's cold start is also unusually expensive on both counts that matter, loading an embedding model *and* rebuilding an in-RAM HNSW graph.
+
+**The number that settled it, and where it came from:** section 19 rejected provisioned concurrency as "a standing 24/7 cost, roughly $10+/month." That reasoning was right but the figure was low and, more importantly, it was never compared against the obvious alternative. Pricing it properly: keeping 2GB of Lambda permanently warm is about **$21.90/month**, while a `t4g.medium` (2 vCPU, 4GB) is **$24.53/month** run continuously and about **$0.67** if it is only on for twenty hours of demos. For roughly the cost of keeping Lambda warm, an instance removes cold starts entirely, and switching it off makes it an order of magnitude cheaper. The rejected option had been carrying the answer since section 19; nobody had costed the thing it was being rejected in favor of.
+
+**The constraint that disappears, which is the larger win:** Lambda's 250MB package limit was the *only* reason the design needed a container image, ECR, and a Docker build step, and the only reason embedding was ever pushed to a managed service (section 20). Removing Lambda deletes all of it: Lambda, API Gateway, ECR, the image, and the SAM packaging. `uvicorn` serves HTTP directly and a virtualenv has no ceiling to design around. A migration that is mostly deletion is a good signal about how the code underneath was factored.
+
+**It also cashes in a deferral.** Section 19 considered snapshotting the built graph to S3 and deferred it as too complex: something had to decide when to re-persist, and concurrent Lambdas made consistency a real question. On one instance with a disk that survives stop/start, both problems evaporate, so the snapshot is a local file written at shutdown and read at boot, with rebuild-from-DynamoDB as the fallback when it is missing or unusable. The complexity that justified deferring it was entirely a property of the platform, not of the idea.
+
+**What is deliberately kept rather than deleted:** the Lambda implementation and its measurements stay in git history and stay documented. Same reasoning as keeping `LinearIndex` after HNSW existed (section 1): the rejected option is what makes the chosen one's numbers mean anything.
+
+**Talking point:** "I built it serverless, measured the cold start, and concluded serverless was the wrong shape for a latency-sensitive cache. The tell was that I'd already rejected provisioned concurrency on cost without ever pricing the alternative it was losing to, and when I did, the alternative was cheaper *and* removed the constraint that had forced three other workarounds."
+
+---
+
+## 24. Debugging story #6: the verification that was measuring the wrong model
+
+**Found while re-running the end-to-end demo after the platform change**, not by looking for it.
+
+**Symptom:** the demo's paraphrase pair, documented in section 18 as hitting at `0.826`, now scored `0.783` and missed. Nothing about the routing logic had changed.
+
+**The instinct to resist:** treat a number that moved as a regression and go looking for what broke in the code. Nothing had. The measurement had been wrong the whole time, and fixing an unrelated bug is what exposed it.
+
+**Cause:** `Embedder()` defaulted to `all-MiniLM-L6-v2`, while the `0.80` threshold was derived on `all-mpnet-base-v2` (sections 8 and 11). `CacheRouter` fell back to that bare default whenever no embedder was passed, which is exactly what the demo did. So section 18's "verified end-to-end with the real embedding model" was real, but the real model it verified was **not the one the threshold belonged to**. Confirmed directly by scoring the same pair on both:
+
+| model | paraphrase | unrelated |
+|---|---|---|
+| all-MiniLM-L6-v2 | 0.8260 | 0.0991 |
+| all-mpnet-base-v2 | 0.7827 | 0.0462 |
+
+The first row is exactly what section 18 recorded. The demo had been passing on the wrong model's numbers.
+
+**The part that makes this worth writing down rather than quietly fixing:** the corrected behavior is not a regression, it is the eval's own documented result finally showing up in the demo. Section 11's table says mpnet at threshold `0.80` has a hit rate of `0.22`, so **78% of genuine paraphrases are supposed to miss** at this deliberately safety-weighted threshold. Measured directly against the 194-pair set: 15 of 67 paraphrase pairs clear `0.80`, which is `22%`, matching the table exactly. A demo pair that hits was never typical, it was cherry-picked without anyone noticing it had been cherry-picked *by the wrong model*.
+
+**Fix, in two parts.** The default was corrected when the embedder became an interface (`SentenceTransformerEmbedder`'s default is now the model the numbers were measured on, and `CacheRouter` requires an embedder outright so there is no bare default to fall back to). The demo pair was then re-chosen from the verified eval set, picking one that genuinely clears the threshold on the correct model (`0.9404`), so the demo demonstrates the behavior instead of accidentally contradicting the eval.
+
+**The general lesson, and it is the sharpest version of a theme this project keeps hitting:** a passing end-to-end check is only evidence if you know what it actually ran. Sections 6 and 21 were aggregates hiding a bad component and a silently-substituted dependency; this is the same shape a third time, a *demo* silently substituting a dependency, and passing because the substitution happened to be favorable. The failure was not that the number was wrong, it was that a number was being compared against a threshold derived from a different system, and nothing in the output said so.
+
+**Talking point:** "My end-to-end verification was passing on the wrong model for two phases. I found it because fixing an unrelated default made a documented number move, and I chased the moved number instead of assuming I'd broken something. The corrected result actually agrees with my own eval table, which is what convinced me the new number was right and the old one had never been."
 
 ---

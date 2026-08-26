@@ -2,8 +2,15 @@ numpy
 pytest
 sentence-transformers
 
-# Phase 6 (AWS). boto3 ships in the Lambda runtime already, so it's here
-# for local dev and tests; moto mocks DynamoDB so the store's tests never
-# touch a real table or cost anything.
+# Phase 6 (AWS). The service runs as a plain long-lived process on a small
+# EC2 instance, so there is no packaging limit to design around and no
+# container build: a virtualenv and a systemd unit are the whole
+# deployment. moto mocks DynamoDB so the store's tests never touch a real
+# table or cost anything.
+fastapi
+uvicorn[standard]
 boto3
 moto[dynamodb]
+
+# Bedrock client for the miss-path LLM call.
+anthropic[bedrock]

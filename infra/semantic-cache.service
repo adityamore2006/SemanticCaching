@@ -1,0 +1,48 @@
+# systemd unit for the cache API.
+#
+# The point of this file is that starting the instance is the only manual
+# step: systemd brings the app back on every boot with no SSH, which is
+# what makes "turn it on before a demo, off after" a two-command workflow.
+#
+# Install:
+#   sudo cp infra/semantic-cache.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now semantic-cache
+#
+# Logs:  journalctl -u semantic-cache -f
+
+[Unit]
+Description=Semantic cache API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/SemanticCaching/src
+
+# CACHE_TABLE_NAME comes from the CloudFormation stack output. Without it
+# the app falls back to an in-memory store, which works but loses the cache
+# on every restart.
+Environment=CACHE_TABLE_NAME=REPLACE_ME
+Environment=AWS_DEFAULT_REGION=us-east-1
+Environment=SNAPSHOT_PATH=/var/lib/semantic-cache/graph.pkl
+
+# Leave LLM_MODEL_ID unset until the Bedrock quota increase is approved.
+# Unset means the miss path uses the Phase 5 stub, so the cache is fully
+# demonstrable (embed, search, threshold, hit/miss, store) without Bedrock.
+# Environment=LLM_MODEL_ID=anthropic.claude-haiku-4-5
+
+ExecStart=/home/ec2-user/SemanticCaching/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
+
+# SIGINT rather than SIGTERM: uvicorn treats it as a graceful shutdown and
+# runs the lifespan handler, which is what writes the graph snapshot. A
+# hard kill would skip it and force the next boot to rebuild from DynamoDB.
+KillSignal=SIGINT
+TimeoutStopSec=60
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

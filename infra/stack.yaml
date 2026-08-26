@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  Semantic cache: one small instance plus the DynamoDB table it persists to.
+
+  Deliberately a single always-warm instance rather than Lambda. Lambda
+  recycles idle containers on its own schedule, so an unpredictable
+  multi-second cold start lands on an arbitrary request, which is the one
+  failure mode a latency-focused cache cannot absorb. Keeping a Lambda warm
+  also costs more than this instance does. Reasoning: knowledge/learned.md
+  section 23.
+
+  Everything here is stop/start friendly: stop the instance and only the
+  EBS volume keeps billing, roughly $1.60/month.
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 key pair, for SSH access to the instance.
+
+  MyIp:
+    Type: String
+    Description: >
+      Your public IP in CIDR form (e.g. 203.0.113.4/32) so SSH is reachable
+      only from you. Find it with `curl -s https://checkip.amazonaws.com`.
+    AllowedPattern: ^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$
+
+  InstanceType:
+    Type: String
+    Default: t4g.medium
+    AllowedValues: [t4g.small, t4g.medium, t4g.large]
+    Description: >
+      Graviton (ARM), cheaper than x86 for identical work. medium (4 GB) by
+      default because the embedding model's weights, torch's runtime, and
+      the in-RAM graph all share this box. small (2 GB) works but is tight.
+
+  LatestAmi:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+    Description: >
+      Resolved at deploy time from SSM rather than hardcoded, so the stack
+      does not pin a stale AMI id. Must stay an arm64 image to match the
+      Graviton instance types above.
+
+Resources:
+  CacheTable:
+    Type: AWS::DynamoDB::Table
+    # It is a cache: every entry is reconstructible by re-asking the LLM.
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: id
+          KeyType: HASH
+      # On-demand, never provisioned. Provisioned capacity bills around the
+      # clock whether or not anything reads the table.
+      BillingMode: PAY_PER_REQUEST
+
+  # The instance authenticates as this role. No access keys are ever copied
+  # onto the box: EC2 hands short-lived, auto-rotating credentials to the
+  # SDK through the instance metadata service, and boto3 picks them up with
+  # no configuration. A leaked long-lived key is the single most common way
+  # a hobby AWS account gets compromised, and this avoids having one.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Enables browser-based shell access without opening SSH at all.
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: cache-table-access
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                Resource: !GetAtt CacheTable.Arn
+        - PolicyName: bedrock-invoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeModel
+                # Anthropic models only, not bedrock:* on everything. Left
+                # at the anthropic/* prefix rather than one exact ARN
+                # because the Messages endpoint may resolve a model id to
+                # either a foundation model or an inference profile, and
+                # pinning the wrong one fails closed at runtime.
+                Resource:
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/anthropic.*
+                  - !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*.anthropic.*
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Semantic cache API and SSH
+      SecurityGroupIngress:
+        # SSH restricted to one address, never 0.0.0.0/0.
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref MyIp
+          Description: SSH from my IP only
+        # The API is intentionally open so a demo can be shared. It serves
+        # a stubbed or Bedrock-backed answer and stores nothing sensitive.
+        # Narrow this to MyIp too if the demo never needs to be public.
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: 0.0.0.0/0
+          Description: Cache API
+
+  CacheInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LatestAmi
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfile
+      SecurityGroupIds: [!GetAtt SecurityGroup.GroupId]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            # Holds the venv, torch, the model weights, and the graph
+            # snapshot. Survives stop/start, which is what makes restarting
+            # fast instead of a full rebuild.
+            VolumeSize: 20
+            VolumeType: gp3
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: semantic-cache
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -eux
+          dnf update -y
+          dnf install -y python3.11 python3.11-pip git
+          mkdir -p /var/lib/semantic-cache
+          chown ec2-user:ec2-user /var/lib/semantic-cache
+          cat >/etc/profile.d/semantic-cache.sh <<EOF
+          export CACHE_TABLE_NAME=${CacheTable}
+          export AWS_DEFAULT_REGION=${AWS::Region}
+          EOF
+
+Outputs:
+  InstanceId:
+    Description: Use with `aws ec2 start-instances` / `stop-instances`
+    Value: !Ref CacheInstance
+
+  PublicIp:
+    Description: Changes on every stop/start unless you attach an Elastic IP
+    Value: !GetAtt CacheInstance.PublicIp
+
+  ApiUrl:
+    Description: 'POST a JSON body of {"query": "..."} here'
+    Value: !Sub http://${CacheInstance.PublicIp}:8000/query
+
+  CacheTableName:
+    Description: Set as CACHE_TABLE_NAME on the instance
+    Value: !Ref CacheTable
