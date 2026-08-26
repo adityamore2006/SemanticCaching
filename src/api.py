@@ -31,7 +31,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -51,6 +51,12 @@ CACHE_TABLE_NAME = os.environ.get("CACHE_TABLE_NAME")
 SNAPSHOT_PATH = os.environ.get("SNAPSHOT_PATH", "/var/lib/semantic-cache/graph.pkl")
 THRESHOLD = float(os.environ.get("OPERATING_THRESHOLD", OPERATING_THRESHOLD))
 LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID")
+
+# Enables POST /admin/reset. Unset means the endpoint does not exist at
+# all, which is the right default for an API reachable from anywhere:
+# forgetting to configure it fails closed rather than leaving an
+# unauthenticated cache-wipe endpoint exposed.
+RESET_TOKEN = os.environ.get("RESET_TOKEN")
 
 # Populate the curated starter corpus when the cache comes up empty, so a
 # fresh deployment can demonstrate a hit immediately instead of having to
@@ -184,6 +190,10 @@ async def lifespan(app: FastAPI):
     state["router"] = router
     state["started_at"] = time.time()
     state["boot_seconds"] = round(time.time() - started, 2)
+    # These describe the current run alongside uptime_seconds, so startup
+    # zeroes them. Only observable when the app starts twice in one
+    # process (tests do; a deployed service gets a fresh module each time).
+    state["hits"] = state["misses"] = 0
     print(
         f"ready in {state['boot_seconds']}s  "
         f"restored_from={source}  entries={len(router.index)}  threshold={THRESHOLD}"
@@ -218,6 +228,56 @@ def index():
     place.
     """
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
+
+
+@app.post("/admin/reset")
+def reset(x_reset_token: str = Header(default=None)):
+    """Restore the cache to exactly the curated corpus.
+
+    Lives inside the service because the in-memory index is the thing that
+    actually needs clearing, and only this process holds it. Purging the
+    durable store from outside leaves the running index untouched, so the
+    cache keeps serving entries that no longer exist in storage.
+
+    Three steps, and the order matters:
+      1. Clear the store (reserved rows, like the usage counter, survive).
+      2. Delete the snapshot. Skipping this is the subtle failure: the
+         reset looks like it worked, then the next restart reloads the old
+         graph from disk and silently undoes all of it.
+      3. Rebuild the router and re-seed from the canonical corpus.
+
+    Disabled entirely unless RESET_TOKEN is set. This API is deliberately
+    reachable from anywhere, and an unauthenticated endpoint that wipes the
+    cache is not something to leave on by accident, so the default is off
+    rather than open.
+    """
+    if not RESET_TOKEN:
+        # 404 rather than 403: an endpoint that isn't enabled shouldn't
+        # advertise that it exists.
+        raise HTTPException(status_code=404, detail="Not Found")
+    if x_reset_token != RESET_TOKEN:
+        raise HTTPException(status_code=401, detail="bad or missing X-Reset-Token")
+
+    removed = state["router"].cache_store.clear()
+
+    snapshot_removed = False
+    try:
+        os.remove(SNAPSHOT_PATH)
+        snapshot_removed = True
+    except OSError:
+        pass  # absent is the desired end state either way
+
+    router, source = build_router()
+    state["router"] = router
+    state["hits"] = state["misses"] = 0
+
+    print(f"reset: removed {removed}, restored {len(router.index)} ({source})")
+    return {
+        "removed": removed,
+        "restored": len(router.index),
+        "snapshot_deleted": snapshot_removed,
+        "source": source,
+    }
 
 
 @app.post("/query")

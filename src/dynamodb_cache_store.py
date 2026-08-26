@@ -26,6 +26,11 @@ import numpy as np
 
 from cache_store import CacheStore
 
+# Rows whose id starts with this are operational state sharing the table,
+# not cache entries -- currently the daily LLM-call counter. Defined here
+# because the store is what has to avoid deleting them.
+RESERVED_ID_PREFIX = "__"
+
 
 class DynamoDBCacheStore(CacheStore):
     def __init__(self, table_name: str, region_name: str = None, table=None):
@@ -66,6 +71,28 @@ class DynamoDBCacheStore(CacheStore):
                 return total
             kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
+    def clear(self):
+        """Delete every cache entry, keeping reserved rows. Returns the
+        count removed."""
+        ids, kwargs = [], {"ProjectionExpression": "id"}
+        while True:
+            page = self.table.scan(**kwargs)
+            # Reserved rows (the daily usage counter) share this table but
+            # are not cache entries. A demo reset must not quietly clear a
+            # spend guard.
+            ids.extend(
+                item["id"] for item in page["Items"]
+                if not str(item["id"]).startswith(RESERVED_ID_PREFIX)
+            )
+            if "LastEvaluatedKey" not in page:
+                break
+            kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+        with self.table.batch_writer() as batch:
+            for entry_id in ids:
+                batch.delete_item(Key={"id": entry_id})
+        return len(ids)
+
     def count_by_source(self):
         """Return {source: count} across the table, so a caller can tell how
         much of the cache is curated seed data and how much the model
@@ -76,7 +103,7 @@ class DynamoDBCacheStore(CacheStore):
         while True:
             page = self.table.scan(**kwargs)
             for item in page["Items"]:
-                if str(item["id"]).startswith("__"):
+                if str(item["id"]).startswith(RESERVED_ID_PREFIX):
                     continue  # reserved rows (usage counters), not cache entries
                 counts[item.get("source", "unknown")] = counts.get(item.get("source", "unknown"), 0) + 1
             if "LastEvaluatedKey" not in page:

@@ -69,6 +69,23 @@ class CacheStore(ABC):
     def __len__(self) -> int:
         """Number of stored responses."""
 
+    @abstractmethod
+    def clear(self) -> int:
+        """Remove every cache entry, returning how many were removed.
+
+        A first-class operation rather than something a caller does behind
+        the store's back, because resetting to a known state is a normal
+        thing to need from a cache: demos accumulate entries, and getting
+        back to a clean baseline should not require knowing which storage
+        backend is underneath.
+
+        Implementations must NOT remove reserved rows -- anything whose id
+        starts with "__". Those hold operational state that shares the
+        table, currently the daily LLM-call counter (usage_limiter.py).
+        Clearing the cache is routine; silently resetting a spend guard as
+        a side effect of it is not.
+        """
+
 
 class InMemoryCacheStore(CacheStore):
     """Plain dict-backed store. Phase 5's default; DynamoDBCacheStore
@@ -88,3 +105,11 @@ class InMemoryCacheStore(CacheStore):
 
     def __len__(self):
         return len(self._data)
+
+    def clear(self):
+        # Nothing reserved is ever written here: the usage counter only
+        # exists in the durable store, since an in-memory one would reset
+        # on restart and be no guard at all.
+        removed = len(self._data)
+        self._data.clear()
+        return removed

@@ -28,9 +28,18 @@ Environment=CACHE_TABLE_NAME=REPLACE_ME
 Environment=AWS_DEFAULT_REGION=us-east-1
 Environment=SNAPSHOT_PATH=/var/lib/semantic-cache/graph.pkl
 
+# Enables POST /admin/reset, used by scripts/reset_cache.py to restore the
+# cache to its canonical corpus before a demo. Unset means the endpoint does
+# not exist at all, which is the right default for an API reachable from
+# anywhere. Generate one with: openssl rand -hex 16
+# Environment=RESET_TOKEN=REPLACE_WITH_A_RANDOM_STRING
+
 # Leave LLM_MODEL_ID unset until the Bedrock quota increase is approved.
-# Unset means the miss path uses the Phase 5 stub, so the cache is fully
-# demonstrable (embed, search, threshold, hit/miss, store) without Bedrock.
+# Unset means a miss is REFUSED with a 501 rather than answered. It does not
+# fall back to placeholder text: a stub answer would be cached and then
+# replayed as a confident hit, filling the cache with answers nothing ever
+# answered. Everything that makes this a cache still works without a model,
+# since the seeded corpus serves real hits and near-misses are still refused.
 # Environment=LLM_MODEL_ID=anthropic.claude-haiku-4-5
 
 ExecStart=/home/ec2-user/SemanticCaching/.venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
