@@ -14,12 +14,13 @@ Flow, matching the project brief exactly:
      index and its response into the cache store, return the fresh
      response.
 
-The LLM call is stubbed (call_llm below) on purpose. Phase 5's job is
-proving the routing logic itself is correct -- cheap and fast to iterate
-on. Swapping in real Bedrock is Phase 6's deliberate, separate step (see
-knowledge/learned.md section 16 for why that sequencing matters): pass a
-different callable as `llm=` when that step happens, nothing else here
-changes.
+`llm` is required and has no default. Through Phase 5 it defaulted to a
+stub returning "[stub response for: ...]", which was harmless while nothing
+persisted and actively wrong once things did: a miss cached the
+placeholder, and re-asking the same question served it back as a confident
+HIT. The cache accumulated answers that had never been answered. A miss
+with no model available is a request that cannot be fulfilled, and the
+router now says so rather than inventing something to store.
 
 index_kind has no default on purpose -- HNSW only wins on speed once the
 cache has warmed up past a few thousand entries (knowledge/learned.md
@@ -72,10 +73,20 @@ class EmptyLLMResponse(RuntimeError):
     """
 
 
-def call_llm(query: str) -> str:
-    """Phase 5 stub -- deterministic, free, fast to test. Real Bedrock
-    wiring is Phase 6, deliberately kept out of this file until then."""
-    return f"[stub response for: {query}]"
+class LLMNotConfigured(RuntimeError):
+    """A miss needs an answer and no model is available to produce one.
+
+    Raised instead of substituting placeholder text. Through Phase 5 the
+    default here WAS a stub that returned "[stub response for: ...]", which
+    was fine while nothing persisted and wrong the moment things did: a
+    miss cached the placeholder, and asking the same question again served
+    it back as a confident HIT. The cache filled up with answers that had
+    never been answered.
+
+    A miss with no model is a request the system cannot fulfil, and saying
+    so is the honest outcome. Cached questions keep working, because a hit
+    never needed the model.
+    """
 
 
 @dataclass
@@ -95,9 +106,9 @@ class CacheRouter:
         self,
         index_kind: str,
         embedder: Embedder,
+        llm: Callable[[str], str],
         cache_store: CacheStore = None,
         threshold: float = OPERATING_THRESHOLD,
-        llm: Callable[[str], str] = call_llm,
         **index_params,
     ):
         self.embedder = embedder
@@ -314,6 +325,23 @@ class CacheRouter:
         return True
 
 
+def _offline_llm(query: str) -> str:
+    """What the local demos pass as `llm`. Refuses rather than inventing an
+    answer, so a miss stays a miss instead of poisoning the cache with
+    placeholder text."""
+    raise LLMNotConfigured(
+        "no model configured, so this question cannot be answered or cached"
+    )
+
+
+def _load_seed_answers():
+    """The curated starter corpus, so the demos have something to hit."""
+    import json
+    path = os.path.join(os.path.dirname(__file__), "..", "data", "seed_answers.json")
+    with open(path) as f:
+        return list(json.load(f)["answers"].items())
+
+
 def _run_fixed_demo():
     # Runnable end-to-end demo with the real embedding model (tests use a
     # fake one for speed) -- a genuine miss, a paraphrase that should hit,
@@ -331,7 +359,9 @@ def _run_fixed_demo():
         "hnsw",
         embedder=create_embedder("local"),
         threshold=OPERATING_THRESHOLD,
+        llm=_offline_llm,
     )
+    router.seed(_load_seed_answers())
 
     for query in [
         "Can I merge two accounts into one?",
@@ -352,7 +382,9 @@ def _run_interactive():
         "hnsw",
         embedder=create_embedder("local"),
         threshold=OPERATING_THRESHOLD,
+        llm=_offline_llm,
     )
+    router.seed(_load_seed_answers())
     print(f"interactive mode, threshold={OPERATING_THRESHOLD}. empty line or ctrl-d to quit.\n")
 
     while True:

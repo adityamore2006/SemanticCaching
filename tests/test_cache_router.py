@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from cache_router import CacheRouter, EmptyLLMResponse
+from cache_router import CacheRouter, EmptyLLMResponse, LLMNotConfigured
 from cache_store import InMemoryCacheStore
 
 
@@ -22,6 +22,13 @@ class FakeEmbedder:
         return np.array(self.vectors[text], dtype=np.float32)
 
 
+def stub_llm(query):
+    """Explicit test double. CacheRouter deliberately has no default llm:
+    a default that fabricated answers is exactly what caused misses to be
+    cached and replayed as hits."""
+    return f"[stub response for: {query}]"
+
+
 def counting_llm(calls):
     def llm(query):
         calls.append(query)
@@ -31,7 +38,7 @@ def counting_llm(calls):
 
 def test_first_query_is_always_a_miss():
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("linear", embedder=embedder)
+    router = CacheRouter("linear", embedder=embedder, llm=stub_llm)
 
     result = router.route("reset password")
 
@@ -75,7 +82,7 @@ def test_paraphrase_above_threshold_is_a_hit():
         "reset password": [1.0, 0.0],
         "i forgot my password": [0.9, 0.435889894354067],
     })
-    router = CacheRouter("linear", embedder=embedder)
+    router = CacheRouter("linear", embedder=embedder, llm=stub_llm)
     router.route("reset password")
 
     result = router.route("i forgot my password")
@@ -91,7 +98,7 @@ def test_near_miss_below_threshold_is_a_miss_and_gets_inserted():
         "reset password": [1.0, 0.0],
         "change my email": [0.7, 0.7141428428542852],
     })
-    router = CacheRouter("linear", embedder=embedder)
+    router = CacheRouter("linear", embedder=embedder, llm=stub_llm)
     router.route("reset password")
 
     result = router.route("change my email")
@@ -103,7 +110,7 @@ def test_near_miss_below_threshold_is_a_miss_and_gets_inserted():
 
 def test_works_with_hnsw_index_too():
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("hnsw", embedder=embedder)
+    router = CacheRouter("hnsw", embedder=embedder, llm=stub_llm)
 
     first = router.route("reset password")
     second = router.route("reset password")
@@ -124,7 +131,7 @@ def test_an_empty_injected_cache_store_is_still_used():
     store = InMemoryCacheStore()
     assert len(store) == 0
 
-    router = CacheRouter("linear", embedder=embedder, cache_store=store)
+    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
     router.route("reset password")
 
     assert router.cache_store is store
@@ -137,7 +144,7 @@ def test_restore_rebuilds_the_index_and_serves_hits_from_it():
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
     store.put("q_0", "restored answer")
-    router = CacheRouter("hnsw", embedder=embedder, cache_store=store)
+    router = CacheRouter("hnsw", embedder=embedder, cache_store=store, llm=stub_llm)
 
     restored = router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
 
@@ -175,12 +182,66 @@ def test_restore_resumes_the_id_counter_instead_of_overwriting_entries():
 def test_restore_ignores_ids_that_do_not_follow_the_counter_format():
     # Ids that didn't come from the counter shouldn't corrupt it.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("linear", embedder=embedder)
+    router = CacheRouter("linear", embedder=embedder, llm=stub_llm)
 
     router.restore([("seeded-entry", np.array([0.0, 1.0], dtype=np.float32))])
     router.route("reset password")
 
     assert router.cache_store.get("q_0") == "[stub response for: reset password]"
+
+
+def refusing_llm(query):
+    raise LLMNotConfigured("no model configured")
+
+
+def test_llm_is_required_and_has_no_fabricating_default():
+    # The default used to be a stub returning placeholder text. Constructing
+    # without an llm must now fail loudly rather than quietly fabricating.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    with pytest.raises(TypeError):
+        CacheRouter("linear", embedder=embedder)
+
+
+def test_a_miss_with_no_model_caches_nothing():
+    # The bug this prevents, seen in the demo: a miss stored placeholder
+    # text, and asking the same question again returned it as a confident
+    # HIT at similarity 1.0 -- an answer that was never answered.
+    embedder = FakeEmbedder({"a new question": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    router = CacheRouter(
+        "linear", embedder=embedder, cache_store=store, llm=refusing_llm
+    )
+
+    with pytest.raises(LLMNotConfigured):
+        router.route("a new question")
+
+    assert len(store) == 0
+    assert len(router.index) == 0
+
+    # And critically: asking again still misses, rather than hitting on
+    # something the first attempt left behind.
+    with pytest.raises(LLMNotConfigured):
+        router.route("a new question")
+    assert len(router.index) == 0
+
+
+def test_seeded_answers_still_serve_hits_with_no_model():
+    # Refusing to answer new questions must not take the cache offline.
+    # Anything seeded keeps working, because a hit never needed a model.
+    embedder = FakeEmbedder({
+        "reset password": [1.0, 0.0],
+        "i forgot my password": [0.9, 0.435889894354067],
+        "something else entirely": [0.0, 1.0],
+    })
+    router = CacheRouter("linear", embedder=embedder, llm=refusing_llm)
+    router.seed([("reset password", "Use the forgot password link.")])
+
+    hit = router.route("i forgot my password")
+    assert hit.hit is True
+    assert hit.response == "Use the forgot password link."
+
+    with pytest.raises(LLMNotConfigured):
+        router.route("something else entirely")
 
 
 def test_seed_populates_without_calling_the_llm():
@@ -210,7 +271,7 @@ def test_a_seeded_answer_is_served_on_a_paraphrase():
         "reset password": [1.0, 0.0],
         "i forgot my password": [0.9, 0.435889894354067],
     })
-    router = CacheRouter("linear", embedder=embedder)
+    router = CacheRouter("linear", embedder=embedder, llm=stub_llm)
     router.seed([("reset password", "Use the forgot password link.")])
 
     result = router.route("i forgot my password")
@@ -223,7 +284,7 @@ def test_seeding_twice_does_not_duplicate_entries():
     # Re-running the seed must be safe, or a restart would pile up
     # near-identical entries competing for the same neighborhood.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("linear", embedder=embedder)
+    router = CacheRouter("linear", embedder=embedder, llm=stub_llm)
 
     assert router.seed([("reset password", "an answer")]) == 1
     assert router.seed([("reset password", "an answer")]) == 0
@@ -235,7 +296,7 @@ def test_seed_refuses_an_empty_answer():
     # whatever produced it.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
-    router = CacheRouter("linear", embedder=embedder, cache_store=store)
+    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
 
     with pytest.raises(EmptyLLMResponse):
         router.seed([("reset password", "   ")])
@@ -339,7 +400,7 @@ def test_an_orphaned_entry_is_healed_in_place_not_duplicated():
     # the orphan in the index to fail identically on every future query.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
-    router = CacheRouter("linear", embedder=embedder, cache_store=store)
+    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
     router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
 
     router.route("reset password")
@@ -356,13 +417,13 @@ def test_an_orphaned_entry_is_healed_in_place_not_duplicated():
 def test_snapshot_roundtrips_the_index_and_serves_hits(tmp_path):
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
-    router = CacheRouter("hnsw", embedder=embedder, cache_store=store)
+    router = CacheRouter("hnsw", embedder=embedder, cache_store=store, llm=stub_llm)
     router.route("reset password")
     path = tmp_path / "graph.pkl"
     router.save_snapshot(path)
 
     # A fresh process: same store, empty index until the snapshot loads.
-    revived = CacheRouter("hnsw", embedder=embedder, cache_store=store)
+    revived = CacheRouter("hnsw", embedder=embedder, cache_store=store, llm=stub_llm)
     assert len(revived.index) == 0
     assert revived.load_snapshot(path) is True
 
@@ -379,12 +440,12 @@ def test_snapshot_carries_the_id_counter(tmp_path):
         "change my email": [0.7, 0.7141428428542852],
     })
     store = InMemoryCacheStore()
-    router = CacheRouter("linear", embedder=embedder, cache_store=store)
+    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
     router.route("reset password")  # mints q_0
     path = tmp_path / "graph.pkl"
     router.save_snapshot(path)
 
-    revived = CacheRouter("linear", embedder=embedder, cache_store=store)
+    revived = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
     revived.load_snapshot(path)
     revived.route("change my email")  # a miss, mints the next id
 
@@ -398,14 +459,14 @@ def test_snapshot_from_a_different_embedding_model_is_rejected(tmp_path):
     # it would compare this model's queries against that model's vectors
     # and serve confident garbage.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("hnsw", embedder=embedder)
+    router = CacheRouter("hnsw", embedder=embedder, llm=stub_llm)
     router.route("reset password")
     path = tmp_path / "graph.pkl"
     router.save_snapshot(path)
 
     other = FakeEmbedder({"reset password": [1.0, 0.0]})
     other.model_name = "some-other-model"
-    revived = CacheRouter("hnsw", embedder=other)
+    revived = CacheRouter("hnsw", embedder=other, llm=stub_llm)
 
     assert revived.load_snapshot(path) is False
     assert len(revived.index) == 0  # left empty, caller falls back to the store
@@ -413,7 +474,7 @@ def test_snapshot_from_a_different_embedding_model_is_rejected(tmp_path):
 
 def test_load_snapshot_returns_false_when_there_is_no_file(tmp_path):
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("hnsw", embedder=embedder)
+    router = CacheRouter("hnsw", embedder=embedder, llm=stub_llm)
     assert router.load_snapshot(tmp_path / "does-not-exist.pkl") is False
 
 
@@ -423,7 +484,7 @@ def test_load_snapshot_returns_false_on_a_corrupt_file(tmp_path):
     path = tmp_path / "graph.pkl"
     path.write_bytes(b"not a pickle")
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("hnsw", embedder=embedder)
+    router = CacheRouter("hnsw", embedder=embedder, llm=stub_llm)
     assert router.load_snapshot(path) is False
 
 
@@ -434,7 +495,7 @@ def test_custom_threshold_is_respected():
         "reset password": [1.0, 0.0],
         "i forgot my password": [0.9, 0.435889894354067],
     })
-    router = CacheRouter("linear", embedder=embedder, threshold=0.95)
+    router = CacheRouter("linear", embedder=embedder, threshold=0.95, llm=stub_llm)
     router.route("reset password")
 
     result = router.route("i forgot my password")
