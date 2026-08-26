@@ -61,6 +61,22 @@ Goal: wire the index into the actual cache decision logic (hit -> return stored 
 
 **Still ruled out, unchanged:** OpenSearch Serverless (real idle billing floor) and Lambda provisioned concurrency (standing 24/7 cost, and now also simply more expensive than the instance).
 
+## Phase 7: making the miss path safe, and a demo surface
+
+Everything here exists because switching the LLM from a stub to real Bedrock turns several harmless things into real ones.
+
+**Never cache a bad answer.** An LLM that *raises* was always safe, since `route()` writes nothing on an exception. The hole was an LLM that returns successfully with unusable content: an empty string is not `None`, so it passed the orphan check and would be served as a confident HIT to every future paraphrase, permanently. `BedrockLLM` now raises on a refusal, on a `max_tokens` truncation (a half-finished answer looks fine and would be replayed forever), and on empty text. `CacheRouter` independently rejects a falsy or whitespace-only response, because `llm` is caller-supplied and the router should not trust it. Same principle as refusing to serve a `None` found in the store (learned.md section 21).
+
+**Fail usefully at the boundary.** `api.py` returns 429 for the daily cap (a policy decision), 503 for an unusable answer or an upstream failure, and 422 for a query that is empty or over 2000 characters. Every one of those paths leaves the cache untouched, which is the actual guarantee worth having.
+
+**A daily ceiling on LLM calls** (`src/usage_limiter.py`). The API is deliberately public so the demo URL always works, and every miss costs a real Bedrock call, so a stranger sending novel queries spends real money. The counter lives in DynamoDB rather than memory: an in-memory count resets on restart, so anyone who could restart the process could clear the cap. Its row carries no `vector` attribute, which is what makes it invisible to `all_items()` and therefore to the cold-start rebuild. This is the innermost of three cost layers, bounding spend *before* it happens rather than hours later when billing data catches up (learned.md section 23c).
+
+**Purge before switching on Bedrock** (`scripts/purge_cache.py`). Entries written while the stub was active hold `[stub response for: ...]`, and they do not disappear when the real model arrives -- they keep being served as hits, which look like success. Purge, restart, re-seed.
+
+**A demo page served by FastAPI** (`src/static/index.html` at `/`), showing hit/miss, similarity against the threshold, latency, and a running count of model calls avoided.
+
+**S3 + CloudFront was considered and rejected** for that page, on the same grounds as OpenSearch Serverless (section 16), provisioned concurrency (section 19), and Lambda (section 23): a service has to earn its place. The page is useless without this backend, so splitting them across origins buys CORS configuration and a page that loads but errors whenever the instance is stopped, which is most of the time by design. It also demonstrates nothing the existing stack does not already cover.
+
 ## Where we are right now
 
 Phase 1 through Phase 5 are complete. Linear search and HNSW are both built, tested, and benchmarked against each other at a realistic 1k-10k scale (two real bugs found and fixed along the way: an O(n^2) insert bug and an unrecoverable upper-layer routing bug, see `knowledge/learned.md`). `src/cache_router.py` wires embedding, index, and storage into the real hit/miss decision.

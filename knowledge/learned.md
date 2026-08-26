@@ -460,6 +460,26 @@ Only the first is deterministic. The others are backstops for spend that isn't t
 
 ---
 
+## 23d. A cache makes every bad answer permanent, which changes what "error handling" means
+
+Found while auditing the miss path before switching the LLM from a stub to real Bedrock. Nothing here was broken *yet*, because a stub cannot fail.
+
+**The reframe worth leading with:** in an ordinary service, a bad response from an upstream API is one bad response. In a cache, it is written down and replayed to every future query that matches it. The blast radius of a single failure is unbounded in time. That makes validating the response before storing it a correctness requirement, not defensive politeness.
+
+**The specific hole: an LLM that succeeds and returns nothing.** An exception was always safe, because `route()` calls the LLM before it writes anything, so a raise leaves the cache untouched. But `BedrockLLM` built its answer with `"".join(block.text for block in response.content if block.type == "text")`, which returns `""` when there are no text blocks. And `"" is not None`, so the empty string would be stored, pass the orphan check on every later query, and be served as a **confident HIT with an empty answer, forever**.
+
+**Truncation is the same shape and easier to miss.** A `max_tokens` cut-off returns HTTP 200 with real, well-formed, useful-looking text that simply stops mid-sentence. Nothing downstream can distinguish it from a complete answer. Cached, it becomes a permanently half-finished response. `stop_reason` was never checked.
+
+**Fixed at both ends, deliberately.** `BedrockLLM` raises on refusal, on `max_tokens`, and on empty text -- raising is the correct channel precisely because the router already handles exceptions safely. Then `CacheRouter` *independently* rejects a falsy or whitespace-only response, because `llm` is a caller-supplied callable and the component that owns the cache should not trust an argument it was handed. Same reasoning as section 21, where the router refused to serve a `None` it found in the store rather than assuming storage was consistent.
+
+**The guarantee that is actually worth asserting**, and what the tests check: after any failure -- upstream throttle, refusal, truncation, empty answer, daily cap -- **the cache contains exactly what it contained before**. Not "an error was returned", which is easy and shallow, but "nothing was written", which is the property that keeps a transient failure from becoming permanent.
+
+**A related trap the same audit surfaced: entries written during development are indistinguishable from real ones.** 73 rows held `[stub response for: ...]`, and switching on the real model would not have removed them. They would keep being served as cache hits, which look like success, so nothing would ever surface it. Hence `scripts/purge_cache.py`. **Anything a cache stores while the backend is fake outlives the fake backend.**
+
+**Talking point:** "Error handling in a cache is a different problem than error handling in a normal service, because a bad answer doesn't fail once, it gets stored and replayed. So my miss path validates the response before it writes, and the thing my tests assert isn't that an error was returned, it's that the cache was left byte-for-byte unchanged."
+
+---
+
 ## 24. Debugging story #6: the verification that was measuring the wrong model
 
 **Found while re-running the end-to-end demo after the platform change**, not by looking for it.

@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from cache_router import CacheRouter
+from cache_router import CacheRouter, EmptyLLMResponse
 from cache_store import InMemoryCacheStore
 
 
@@ -181,6 +181,75 @@ def test_restore_ignores_ids_that_do_not_follow_the_counter_format():
     router.route("reset password")
 
     assert router.cache_store.get("q_0") == "[stub response for: reset password]"
+
+
+def test_an_empty_llm_response_is_never_cached():
+    # The failure this prevents: "" is not None, so a cached empty answer
+    # passes the orphan check and is served as a confident HIT to every
+    # future paraphrase, permanently.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    router = CacheRouter(
+        "linear", embedder=embedder, cache_store=store, llm=lambda q: ""
+    )
+
+    with pytest.raises(EmptyLLMResponse):
+        router.route("reset password")
+
+    # Nothing persisted, so the next attempt gets a clean shot at it.
+    assert len(store) == 0
+    assert len(router.index) == 0
+
+
+def test_a_whitespace_only_llm_response_is_never_cached():
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    router = CacheRouter(
+        "linear", embedder=embedder, cache_store=store, llm=lambda q: "   \n  "
+    )
+
+    with pytest.raises(EmptyLLMResponse):
+        router.route("reset password")
+    assert len(store) == 0
+
+
+def test_an_llm_that_raises_leaves_the_cache_untouched():
+    # Already true before the empty-response guard, asserted so it stays
+    # true: a failed miss must not half-write an entry.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+
+    def broken(query):
+        raise RuntimeError("bedrock is throttling")
+
+    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=broken)
+
+    with pytest.raises(RuntimeError):
+        router.route("reset password")
+    assert len(store) == 0
+    assert len(router.index) == 0
+
+
+def test_healing_an_orphan_with_an_empty_answer_writes_nothing():
+    # The orphan path writes under an id already in the index, so an empty
+    # answer there would put "" where a lookup will later find it and treat
+    # it as valid. The guard has to fire before that write, not after.
+    #
+    # Note the setup: the store is deliberately left empty so q_0 really is
+    # an orphan. Seeding it with a response would make this an ordinary hit
+    # that never reaches the LLM at all.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    router = CacheRouter(
+        "linear", embedder=embedder, cache_store=store, llm=lambda q: ""
+    )
+    router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
+
+    with pytest.raises(EmptyLLMResponse):
+        router.route("reset password")
+
+    assert store.get("q_0") is None  # no empty entry written
+    assert len(store) == 0
 
 
 def test_a_hit_with_no_stored_response_never_serves_none():

@@ -75,8 +75,20 @@ aws ec2 stop-instances  --instance-ids i-0066a19f7fa7614cb
 ```
 The public IP changes on every start. Read it with `aws ec2 describe-instances --instance-ids i-0066a19f7fa7614cb --query 'Reservations[0].Instances[0].PublicIpAddress' --output text`. systemd starts the API automatically on boot, so starting the instance is the only manual step.
 
+### Phase 7 (built, not yet deployed)
+
+Hardening the miss path before it calls a real model, plus a demo surface. Reasoning in learned.md section 23d.
+
+- **Nothing bad ever gets cached.** `BedrockLLM` raises on refusal, `max_tokens` truncation, or empty text; `CacheRouter` independently rejects an empty or whitespace-only response since `llm` is caller-supplied. Every failure path leaves the cache byte-for-byte unchanged, which is what the tests assert rather than merely checking an error came back.
+- **`api.py` fails usefully:** 429 for the daily cap, 503 for an unusable answer or upstream failure, 422 for an empty or over-2000-character query. Verified all four against a deliberately broken LLM, confirming nothing was written in any of them.
+- **`src/usage_limiter.py`:** a daily ceiling on LLM calls, counted in DynamoDB so a restart cannot reset it. Its row carries no `vector`, which keeps it invisible to `all_items()` and the cold-start rebuild. Default 100/day via `DAILY_LLM_LIMIT`.
+- **`scripts/purge_cache.py`:** clears stub entries, which otherwise survive the switch to real Bedrock and keep being served as hits.
+- **Demo page at `/`** (`src/static/index.html`), served by FastAPI. S3 + CloudFront rejected deliberately, see PLAN.md Phase 7.
+- 64/64 tests passing; verified locally with 67 seeded anchors and the full behaviour tour.
+
 ### Remaining
 
+0. **Deploy Phase 7:** pull on the instance, restart the service. Nothing in it requires Bedrock, so it can ship before the quota clears.
 1. **Bedrock quota** for Claude Haiku 4.5 (`L-CCA5DF70` requests/min, `L-58BE175A` tokens/min, both adjustable and currently 0). Until it clears, `LLM_MODEL_ID` stays unset and the miss path uses the Phase 5 stub, so everything that makes this a cache is demonstrable without it. Once approved: set `LLM_MODEL_ID` in `/etc/systemd/system/semantic-cache.service`, restart, and re-seed to replace stub answers with real ones.
 2. **Optional, deferred deliberately:** a stable address (Elastic IP, ~$3.65/mo) so the demo URL survives restarts; HTTPS via Caddy; and the CloudWatch dashboard. None are needed to demo.
 3. **Open lead, not blocking:** the orphaned-node hypothesis in learned.md section 22b, which may explain the remaining half of section 15's recall ceiling.

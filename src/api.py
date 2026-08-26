@@ -30,11 +30,13 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
-from cache_router import CacheRouter, OPERATING_THRESHOLD
+from cache_router import CacheRouter, EmptyLLMResponse, OPERATING_THRESHOLD
 from local_embedder import SentenceTransformerEmbedder
+from usage_limiter import DailyLimitReached, UsageLimiter
 
 # Configuration is read here, at the entry point, rather than inside the
 # components, so the components stay usable from the eval harness and
@@ -46,11 +48,19 @@ LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID")
 
 # Set at startup. Module-level because a single long-lived process is the
 # whole point: this survives every request, unlike a Lambda container.
-state = {"router": None, "hits": 0, "misses": 0, "started_at": None, "boot_seconds": None}
+state = {
+    "router": None, "hits": 0, "misses": 0,
+    "started_at": None, "boot_seconds": None, "limiter": None,
+}
 
 
 class QueryRequest(BaseModel):
-    query: str
+    # Bounded on purpose. Every query that misses becomes a permanent cache
+    # entry, so an empty or enormous one is not just a bad request, it is
+    # persistent pollution. 2000 characters is far past any real support
+    # question and well inside DynamoDB's 400KB item limit alongside a
+    # 768-float vector.
+    query: str = Field(..., min_length=1, max_length=2000)
 
 
 def _build_store():
@@ -82,6 +92,13 @@ def build_router():
 
     kwargs = {"cache_store": store, "threshold": THRESHOLD}
     if llm is not None:
+        # Only meaningful with a durable store, since the counter lives in
+        # the same table. Without one there is no real LLM configured
+        # either, so there is nothing to cap.
+        if durable:
+            limiter = UsageLimiter(store.table)
+            state["limiter"] = limiter
+            llm = limiter.wrap(llm)
         kwargs["llm"] = llm
     router = CacheRouter("hnsw", embedder=embedder, **kwargs)
 
@@ -131,11 +148,51 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Semantic Cache", lifespan=lifespan)
 
 
+@app.get("/", include_in_schema=False)
+def index():
+    """The demo page, served by the same process as the API.
+
+    Deliberately not S3 + CloudFront. The page is useless without this
+    backend, so splitting them across two origins buys CORS configuration
+    and a page that loads but errors whenever the instance is stopped,
+    which is most of the time by design. It also adds a service that
+    demonstrates nothing the rest of the stack does not already cover.
+    Same reasoning that ruled out OpenSearch Serverless and Lambda
+    (knowledge/learned.md sections 16, 19, 23): a service has to earn its
+    place.
+    """
+    return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
+
+
 @app.post("/query")
 def query(request: QueryRequest):
     router = state["router"]
     started = time.time()
-    result = router.route(request.query)
+
+    try:
+        result = router.route(request.query)
+    except DailyLimitReached as exc:
+        # 429, not 503: this is a deliberate policy decision, not a
+        # malfunction, and the caller should know the difference. Cache
+        # hits keep working while this is in effect, since they never
+        # touch the LLM.
+        raise HTTPException(status_code=429, detail=str(exc))
+    except EmptyLLMResponse as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        # Anything else from the miss path is upstream: throttling, auth,
+        # a network failure. Return a useful message rather than a stack
+        # trace, and log the real error where it can be found.
+        #
+        # Nothing was cached in any of these branches, which is the point.
+        # route() writes only after the LLM returns something usable, so a
+        # failure leaves the cache exactly as it was.
+        print(f"route failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(
+            status_code=503,
+            detail=f"upstream model call failed ({type(exc).__name__}); nothing was cached",
+        )
+
     latency_ms = (time.time() - started) * 1000
 
     state["hits" if result.hit else "misses"] += 1
@@ -161,7 +218,10 @@ def stats():
     cost-savings claim made countable rather than estimated."""
     hits, misses = state["hits"], state["misses"]
     total = hits + misses
+    limiter = state["limiter"]
     return {
+        "llm_calls_remaining_today": limiter.remaining() if limiter else None,
+        "daily_llm_limit": limiter.limit if limiter else None,
         "entries": len(state["router"].index),
         "requests": total,
         "hits": hits,
