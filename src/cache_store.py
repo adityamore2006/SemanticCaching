@@ -23,9 +23,28 @@ class CacheStore(ABC):
     """Maps an id to the response stored under it. Nothing more."""
 
     @abstractmethod
-    def put(self, id: Hashable, response: str, vector: Optional[Sequence[float]] = None) -> None:
+    def put(
+        self,
+        id: Hashable,
+        response: str,
+        vector: Optional[Sequence[float]] = None,
+        source: Optional[str] = None,
+    ) -> None:
         """
         Store response under id, overwriting any existing entry.
+
+        `source` records where the answer came from: "seed" for the curated
+        starter corpus, "llm" for something a model actually produced.
+        Optional because an in-memory store used in tests has no need for
+        provenance.
+
+        It exists because without it the two are indistinguishable -- both
+        are just a string in `response` -- and that matters in both
+        directions. A curated seed answer that reads plausibly is *more*
+        dangerous unlabelled than an obvious placeholder, since nothing
+        surfaces that it was never generated. And a purge that cannot tell
+        them apart has to delete everything, including answers that were
+        paid for.
 
         `vector` is the query embedding that produced this entry. It's
         optional because an in-memory store has no use for it: the index
@@ -58,9 +77,10 @@ class InMemoryCacheStore(CacheStore):
     def __init__(self):
         self._data = {}
 
-    def put(self, id, response, vector=None):
-        # vector deliberately ignored -- see the contract's docstring. This
-        # store never outlives the in-memory index holding the same vector.
+    def put(self, id, response, vector=None, source=None):
+        # vector and source deliberately ignored -- see the contract's
+        # docstring. This store never outlives the in-memory index holding
+        # the same vector, and nothing queries provenance in memory.
         self._data[id] = response
 
     def get(self, id):

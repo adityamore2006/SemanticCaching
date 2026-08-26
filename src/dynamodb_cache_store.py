@@ -36,8 +36,10 @@ class DynamoDBCacheStore(CacheStore):
         self.table = table
         self.table_name = table_name
 
-    def put(self, id, response, vector=None):
+    def put(self, id, response, vector=None, source=None):
         item = {"id": id, "response": response}
+        if source is not None:
+            item["source"] = source
         if vector is not None:
             # DynamoDB has no float type -- Number is arbitrary-precision
             # decimal, and boto3 rejects raw floats rather than silently
@@ -62,6 +64,23 @@ class DynamoDBCacheStore(CacheStore):
             total += page["Count"]
             if "LastEvaluatedKey" not in page:
                 return total
+            kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+    def count_by_source(self):
+        """Return {source: count} across the table, so a caller can tell how
+        much of the cache is curated seed data and how much the model
+        actually produced. Entries written before `source` existed count as
+        "unknown" rather than being silently attributed to either."""
+        counts = {}
+        kwargs = {"ProjectionExpression": "id, #s", "ExpressionAttributeNames": {"#s": "source"}}
+        while True:
+            page = self.table.scan(**kwargs)
+            for item in page["Items"]:
+                if str(item["id"]).startswith("__"):
+                    continue  # reserved rows (usage counters), not cache entries
+                counts[item.get("source", "unknown")] = counts.get(item.get("source", "unknown"), 0) + 1
+            if "LastEvaluatedKey" not in page:
+                return counts
             kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
     def all_items(self):

@@ -183,6 +183,65 @@ def test_restore_ignores_ids_that_do_not_follow_the_counter_format():
     assert router.cache_store.get("q_0") == "[stub response for: reset password]"
 
 
+def test_seed_populates_without_calling_the_llm():
+    calls = []
+    embedder = FakeEmbedder({
+        "reset password": [1.0, 0.0],
+        "cancel plan": [0.0, 1.0],
+    })
+    store = InMemoryCacheStore()
+    router = CacheRouter(
+        "linear", embedder=embedder, cache_store=store, llm=counting_llm(calls)
+    )
+
+    added = router.seed([
+        ("reset password", "Use the forgot password link."),
+        ("cancel plan", "Settings then Billing then Cancel."),
+    ])
+
+    assert added == 2
+    assert calls == []  # the whole point: seeding costs no model calls
+    assert len(router.index) == 2
+    assert store.get("q_0") == "Use the forgot password link."
+
+
+def test_a_seeded_answer_is_served_on_a_paraphrase():
+    embedder = FakeEmbedder({
+        "reset password": [1.0, 0.0],
+        "i forgot my password": [0.9, 0.435889894354067],
+    })
+    router = CacheRouter("linear", embedder=embedder)
+    router.seed([("reset password", "Use the forgot password link.")])
+
+    result = router.route("i forgot my password")
+
+    assert result.hit is True
+    assert result.response == "Use the forgot password link."
+
+
+def test_seeding_twice_does_not_duplicate_entries():
+    # Re-running the seed must be safe, or a restart would pile up
+    # near-identical entries competing for the same neighborhood.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    router = CacheRouter("linear", embedder=embedder)
+
+    assert router.seed([("reset password", "an answer")]) == 1
+    assert router.seed([("reset password", "an answer")]) == 0
+    assert len(router.index) == 1
+
+
+def test_seed_refuses_an_empty_answer():
+    # Same guarantee as the LLM path: nothing empty ever reaches the store,
+    # whatever produced it.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    router = CacheRouter("linear", embedder=embedder, cache_store=store)
+
+    with pytest.raises(EmptyLLMResponse):
+        router.seed([("reset password", "   ")])
+    assert len(store) == 0
+
+
 def test_an_empty_llm_response_is_never_cached():
     # The failure this prevents: "" is not None, so a cached empty answer
     # passes the orphan check and is served as a confident HIT to every
