@@ -9,7 +9,7 @@ First AWS project notes are inline. The short version: you run four commands, an
 | DynamoDB table | Durable store for cached answers and their vectors. On-demand billing, so it costs nothing when idle. |
 | IAM role + instance profile | How the server authenticates to AWS. See "Security" below, this is the part worth understanding. |
 | Security group | Firewall. SSH locked to your IP, port 8000 open for the API. |
-| EC2 instance (`t4g.medium`) | Runs everything: FastAPI, the embedding model, the HNSW graph. |
+| EC2 instance (`m7i-flex.large`) | Runs everything: FastAPI, the embedding model, the HNSW graph. Free-tier eligible, 8 GB. |
 | EBS volume (20 GB) | The instance's disk. Survives stop/start, holds the graph snapshot. |
 
 ## Security: why there are no access keys here
@@ -60,12 +60,19 @@ aws cloudformation describe-stacks --stack-name semantic-cache \
   --query 'Stacks[0].Outputs' --output table
 ```
 
-Note the `InstanceId`, `PublicIp`, and `CacheTableName`.
+Note the `InstanceId` and `CacheTableName`. The public IP is deliberately **not** a stack
+output: it changes on every start, so an output holding one is stale immediately, and a
+stopped instance has none at all, which breaks any stack update. Read it live instead:
+
+```bash
+aws ec2 describe-instances --instance-ids <InstanceId> \
+  --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
+```
 
 **4. Set the app up on the instance.** SSH in (or use `aws ssm start-session --target <InstanceId>`, which needs no SSH key or open port at all, since the role already allows it):
 
 ```bash
-ssh -i ~/.ssh/semantic-cache.pem ec2-user@<PublicIp>
+ssh -i ~/.ssh/semantic-cache.pem ec2-user@<the IP from above>
 
 git clone https://github.com/adityamore2006/SemanticCaching.git
 cd SemanticCaching
@@ -86,15 +93,15 @@ journalctl -u semantic-cache -f
 **5. Verify** from your laptop:
 
 ```bash
-curl -s -X POST http://<PublicIp>:8000/query \
+curl -s -X POST http://<the IP from above>:8000/query \
   -H 'Content-Type: application/json' \
   -d '{"query": "Can I merge two accounts into one?"}'
 
-curl -s -X POST http://<PublicIp>:8000/query \
+curl -s -X POST http://<the IP from above>:8000/query \
   -H 'Content-Type: application/json' \
   -d '{"query": "Is it possible to combine my two separate accounts?"}'
 
-curl -s http://<PublicIp>:8000/stats
+curl -s http://<the IP from above>:8000/stats
 ```
 
 The first is a miss, the second should hit at about `0.94`, matching the local demo.
@@ -121,10 +128,17 @@ aws ec2 describe-instances --instance-ids <InstanceId> \
 
 | | Demo use (~20 hrs/mo) | Left on 24/7 |
 |---|---|---|
-| EC2 `t4g.medium` | $0.67 | $24.53 |
+| EC2 `m7i-flex.large` | $1.92 | $69.90 |
+| Public IPv4 | $0.10 | $3.65 |
 | EBS 20 GB gp3 | $1.60 | $1.60 |
 | DynamoDB on-demand | ~$0.00 | ~$0.00 |
-| **Total** | **≈ $2.30/mo** | **≈ $26.10/mo** |
+| **Total** | **≈ $3.60/mo** | **≈ $75/mo** |
+
+The 24/7 column is the ceiling, not the expectation: the nightly auto-stop below means a
+forgotten instance costs at most one day. `t4g.medium` (4 GB, far cheaper) was the original
+choice but is **not free-tier eligible**, and accounts on the AWS Free Tier plan may only
+launch eligible types. `aws ec2 describe-instance-types --filters Name=free-tier-eligible,Values=true`
+is the authoritative list.
 
 ## Spending guards
 
