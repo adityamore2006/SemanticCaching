@@ -43,6 +43,15 @@ Parameters:
       cents: about $1.92/month for 8 GB against $0.42 for 2 GB, if the
       instance is stopped when idle.
 
+  StopHour:
+    Type: String
+    Default: "0 3"
+    Description: >
+      Minute and hour (America/New_York) for the nightly auto-stop, as the
+      first two fields of a cron expression. Default "0 3" is 3am, chosen
+      because nobody demos then, so the schedule can never interrupt a
+      session in progress.
+
   LatestAmi:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
     Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
@@ -171,19 +180,89 @@ Resources:
           export AWS_DEFAULT_REGION=${AWS::Region}
           EOF
 
+  # Deterministic nightly auto-stop. This is the guard that actually works:
+  # the realistic failure is forgetting the instance is running, not a
+  # runaway workload, and a fixed daily stop caps a forgotten instance at
+  # under 24 hours (~$2.40) no matter what.
+  #
+  # Chosen over a CPU-idle alarm on purpose. One embedding request uses
+  # roughly a CPU-second, so even active demoing averages well under 5% CPU
+  # on 2 vCPUs -- an idle-detection alarm would either fire mid-demo or
+  # never fire at all. A wall-clock schedule has no such ambiguity.
+  SchedulerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: stop-cache-instance
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # Stop only. It can never start the instance, so the schedule
+              # cannot cost money, only save it.
+              - Effect: Allow
+                Action: ec2:StopInstances
+                Resource: !Sub arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:instance/${CacheInstance}
+
+  # AWS Budgets assumes this to stop the instance when spend crosses the
+  # limit. Separate from SchedulerRole because a different service principal
+  # assumes it; same deliberate restriction to stop-only on this one
+  # instance, so neither guard can ever start anything.
+  BudgetActionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: budgets.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: stop-cache-instance-on-budget
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:StopInstances
+                  - ec2:DescribeInstanceStatus
+                Resource: "*"
+
+  NightlyStop:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: Stop the cache instance nightly so a forgotten one cannot run for days
+      ScheduleExpression: !Sub cron(${StopHour} * * ? *)
+      ScheduleExpressionTimezone: America/New_York
+      FlexibleTimeWindow: { Mode: "OFF" }
+      Target:
+        Arn: arn:aws:scheduler:::aws-sdk:ec2:stopInstances
+        RoleArn: !GetAtt SchedulerRole.Arn
+        Input: !Sub '{"InstanceIds": ["${CacheInstance}"]}'
+
 Outputs:
+  # Only stable attributes belong here. An earlier version also output
+  # PublicIp and a derived ApiUrl, which broke every stack update performed
+  # while the instance was stopped: a stopped instance has no public IP, so
+  # !GetAtt CacheInstance.PublicIp fails to resolve and rolls back the whole
+  # update. They were misleading anyway, since the IP changes on every start,
+  # so an output holding one is stale the moment you restart. Read the
+  # current IP from the instance instead:
+  #   aws ec2 describe-instances --instance-ids <id> \
+  #     --query 'Reservations[0].Instances[0].PublicIpAddress' --output text
   InstanceId:
     Description: Use with `aws ec2 start-instances` / `stop-instances`
     Value: !Ref CacheInstance
 
-  PublicIp:
-    Description: Changes on every stop/start unless you attach an Elastic IP
-    Value: !GetAtt CacheInstance.PublicIp
-
-  ApiUrl:
-    Description: 'POST a JSON body of {"query": "..."} here'
-    Value: !Sub http://${CacheInstance.PublicIp}:8000/query
-
   CacheTableName:
     Description: Set as CACHE_TABLE_NAME on the instance
     Value: !Ref CacheTable
+
+  BudgetActionRoleArn:
+    Description: Pass to `aws budgets create-budget-action --execution-role-arn`
+    Value: !GetAtt BudgetActionRole.Arn
