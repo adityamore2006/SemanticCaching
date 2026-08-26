@@ -26,6 +26,7 @@ Run it:
     uvicorn api:app --host 0.0.0.0 --port 8000
 """
 
+import json
 import os
 import time
 from contextlib import asynccontextmanager
@@ -45,6 +46,15 @@ CACHE_TABLE_NAME = os.environ.get("CACHE_TABLE_NAME")
 SNAPSHOT_PATH = os.environ.get("SNAPSHOT_PATH", "/var/lib/semantic-cache/graph.pkl")
 THRESHOLD = float(os.environ.get("OPERATING_THRESHOLD", OPERATING_THRESHOLD))
 LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID")
+
+# Populate the curated starter corpus when the cache comes up empty, so a
+# fresh deployment can demonstrate a hit immediately instead of having to
+# be warmed by hand. Set to 0 to bring it up genuinely cold.
+SEED_ON_EMPTY = os.environ.get("SEED_ON_EMPTY", "1") != "0"
+SEED_ANSWERS_PATH = os.environ.get(
+    "SEED_ANSWERS_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "data", "seed_answers.json"),
+)
 
 # Set at startup. Module-level because a single long-lived process is the
 # whole point: this survives every request, unlike a Lambda container.
@@ -118,7 +128,30 @@ def build_router():
     else:
         source = "empty (no CACHE_TABLE_NAME, nothing persists)"
 
+    # A cache that starts empty misses on its first query by definition, so
+    # the behaviour worth demonstrating never happens on a fresh deployment.
+    # Only seeds when the index is genuinely empty, so this runs once on a
+    # new table and never touches a warm one.
+    if SEED_ON_EMPTY and len(router.index) == 0:
+        pairs = load_seed_answers()
+        if pairs:
+            added = router.seed(pairs)
+            source = f"{source} + seeded {added}"
+
     return router, source
+
+
+def load_seed_answers(path=SEED_ANSWERS_PATH):
+    """(question, answer) pairs from the curated starter corpus, or [] if
+    the file is missing. Absence is not an error: the service runs fine
+    against an empty cache, it just starts cold."""
+    try:
+        with open(path) as f:
+            answers = json.load(f)["answers"]
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        print(f"no seed corpus loaded from {path}: {exc}")
+        return []
+    return list(answers.items())
 
 
 @asynccontextmanager

@@ -84,7 +84,9 @@ Hardening the miss path before it calls a real model, plus a demo surface. Reaso
 - **`src/usage_limiter.py`:** a daily ceiling on LLM calls, counted in DynamoDB so a restart cannot reset it. Its row carries no `vector`, which keeps it invisible to `all_items()` and the cold-start rebuild. Default 100/day via `DAILY_LLM_LIMIT`.
 - **`scripts/purge_cache.py`:** clears stub entries, which otherwise survive the switch to real Bedrock and keep being served as hits.
 - **Demo page at `/`** (`src/static/index.html`), served by FastAPI. S3 + CloudFront rejected deliberately, see PLAN.md Phase 7.
-- 64/64 tests passing; verified locally with 67 seeded anchors and the full behaviour tour.
+- **`data/seed_answers.json`:** curated answers for all 67 anchors, so the cache starts warm and serves real content instead of `[stub response for: ...]`. `api.py` seeds automatically when the index comes up empty (`SEED_ON_EMPTY`), so a fresh deployment needs no warming step.
+- **`source` on every entry** (`seed` vs `llm`). Without it a plausible curated answer is indistinguishable from a generated one, which is worse than an obvious placeholder, and a purge has to delete everything including answers that were paid for. `DynamoDBCacheStore.count_by_source()` reports the split.
+- 68/68 tests passing; verified locally with the full behaviour tour against the seeded corpus.
 
 ### Remaining
 

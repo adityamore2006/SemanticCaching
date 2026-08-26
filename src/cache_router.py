@@ -53,6 +53,12 @@ OPERATING_THRESHOLD = 0.80  # locked in Phase 2, see knowledge/learned.md sectio
 # reading the counter back out of persisted ones.
 ID_PREFIX = "q_"
 
+# Provenance written with every entry. "seed" is the curated starter
+# corpus, "llm" is an answer a model actually produced. See cache_store.py
+# for why the distinction is worth persisting.
+SOURCE_SEED = "seed"
+SOURCE_LLM = "llm"
+
 # Bumped whenever the snapshot payload's shape changes, so an old file is
 # rejected and rebuilt rather than unpickled into a subtly wrong state.
 SNAPSHOT_VERSION = 1
@@ -157,14 +163,54 @@ class CacheRouter:
             # minting a new one. The index already holds a vector for this
             # neighborhood, so adding a second would leave the orphan
             # behind to fail the same way on every future query.
-            self.cache_store.put(matched_id, response, vector)
+            self.cache_store.put(matched_id, response, vector, source=SOURCE_LLM)
             return RouteResult(response=response, hit=False, matched_id=matched_id, similarity=similarity)
 
         new_id = f"{ID_PREFIX}{self._next_id}"
         self._next_id += 1
         self.index.insert(new_id, vector)
-        self.cache_store.put(new_id, response, vector)
+        self.cache_store.put(new_id, response, vector, source=SOURCE_LLM)
         return RouteResult(response=response, hit=False, matched_id=matched_id, similarity=similarity)
+
+    def seed(self, pairs):
+        """
+        Populate the cache from (question, answer) pairs without calling the
+        LLM. Returns how many entries were added.
+
+        A cache that starts empty misses on its first query no matter what,
+        so the behaviour the system exists to demonstrate never happens on a
+        fresh deployment. Seeding a verified starter corpus fixes that and,
+        unlike generating the same answers, costs nothing and needs no model
+        access.
+
+        Uses the same embed-and-insert path route() does, so a seeded entry
+        is identical in every respect to one the router created -- except
+        `source`, which records that it was curated rather than generated.
+        That single field is what keeps the two tellable apart later.
+
+        Skips a question that already matches something cached above the
+        threshold, so re-running is safe and does not create near-duplicate
+        entries competing for the same neighborhood.
+        """
+        added = 0
+        for question, answer in pairs:
+            if not answer or not str(answer).strip():
+                raise EmptyLLMResponse(
+                    f"seed answer for {question!r} is empty; refusing to cache it"
+                )
+
+            vector = self.embedder.embed(question)
+            if len(self.index) > 0:
+                _, similarity = self.index.search(vector, k=1)[0]
+                if similarity >= self.threshold:
+                    continue
+
+            new_id = f"{ID_PREFIX}{self._next_id}"
+            self._next_id += 1
+            self.index.insert(new_id, vector)
+            self.cache_store.put(new_id, answer, vector, source=SOURCE_SEED)
+            added += 1
+        return added
 
     def restore(self, entries):
         """
