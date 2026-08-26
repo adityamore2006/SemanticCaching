@@ -369,22 +369,61 @@ Related to section 21 and found in the same pass, but a separate defect worth it
 
 ---
 
-## 22b. Open lead: pruning orphans nodes on clustered data, which may be the rest of section 15's recall ceiling
+## 22b. Bounded degree is the design, and the honest limitation that comes with it
 
-**Not investigated yet, recorded so it isn't lost.** Came up from the question "doesn't HNSW already evict the least-connected entries?"
+Came out of the question "doesn't HNSW already evict the least-connected entries?"
 
-**What was measured** (2,000 vectors, dim 64, `M=16` so `M_max0=32`):
+**What pruning actually is, and why it is not a bug.** Every node's neighbor list is capped
+(`M` per layer, `M_max0 = 2M` at layer 0). That cap is from the paper and it is load-bearing:
+it keeps the edge count linear in the number of nodes and the search sublinear. Without it the
+graph degenerates toward complete and HNSW stops being HNSW. When a new node is closer than an
+existing neighbor, the worst edge is dropped. That is the algorithm working.
+
+**What pruning is NOT, and this distinction is worth being precise about:** it removes *edges*,
+never *nodes*. `_prune()` only rewrites adjacency lists; `self.vectors` is never touched.
+Measured directly: after 2,000 inserts, 2,000 nodes are still stored, in every configuration
+tested. So pruning does **not** bound how much the index holds, and it is wrong to describe it
+as keeping memory in check. Entry count grows unbounded until something actually evicts, which
+nothing currently does (and cannot easily, since HNSW has no in-place delete).
+
+**The limitation that follows.** On tightly clustered data, near-identical vectors compete for
+the same capped slots, and some nodes lose *every* incoming edge:
 
 | data shape | nodes stored | nodes with zero in-edges |
 |---|---|---|
 | uniform random | 2,000 / 2,000 | **0** |
 | 8 tight clusters (sigma 0.05) | 2,000 / 2,000 | **245** |
 
-`_prune()` only rewrites adjacency lists, never `self.vectors`, so a node is never removed from storage. But under heavy clustering, near-identical vectors compete for the same 32 slots and some lose *every* incoming edge. A node nothing points at is unreachable by traversal no matter where a search starts.
+A node nothing points at is unreachable by traversal however wide the beam. In a cache that is
+a silent recurring cost rather than a quality issue: a query that should have hit misses, and
+pays for an LLM call, forever.
 
-**Why this is worth chasing:** `eval/scale_dataset.py` generates its benchmark by perturbing 117 anchors with `sigma=0.018`, which is exactly this clustered shape. Section 15 documented a recall ceiling that was improved but never closed (65.5% at n=50,000) and listed sweeping `ef_upper` and raising `M` as untried levers. Orphaning would cap recall directly and independently of both, and it fits section 15's most puzzling result: recall stayed **flat** across a 32x wider `ef_search`. A wider beam cannot reach a node with no in-edges.
+**Deliberately not fixed now, and the reason is scale rather than principle.** The deployed
+cache holds 67 entries and section 16 caps the realistic range at 1k-10k. At 67 nodes with
+`M_max0=32` the graph is nearly complete and orphaning is effectively impossible; the 245-orphan
+measurement came from a deliberate stress shape. Fixing this would mean either usage-aware edge
+retention or periodic graph rebuild, both real work against a problem the current numbers do
+not show. Same test applied to eviction, OpenSearch Serverless, and provisioned concurrency:
+build it when a measurement says to.
 
-**Explicitly a hypothesis, not a finding.** Section 15's `ef_upper` fix produced a real, measured improvement, so upper-layer routing was genuinely part of the problem. Orphaning would be an additional cause, not a replacement. The test: measure orphan rate on the real eval data, then check whether the queries that fail recall are the ones whose true match is orphaned. Overlap would confirm it.
+**The direction worth taking when it does matter, and it is more interesting than a fix:**
+HNSW prunes on **geometry** -- who is nearest -- with no notion of **usage** -- who is actually
+asked. For a general-purpose index that is correct. For a *cache* it is arguably the wrong
+signal: an entry that is ninth-closest but served constantly is exactly the one you least want
+to lose an edge to, and the algorithm cannot express that. A cache-aware variant would weight
+retention by hit frequency alongside distance. That is a genuine deviation from the paper with
+a defensible reason, in the same category as the `ef_upper` change in section 15.
+
+**One loose end this leaves open.** Section 15 never fully closed its recall ceiling and could
+not explain why recall stayed flat across a 32x wider `ef_search`. Orphaning would explain it
+exactly, since a wider beam cannot reach a node with no in-edges, and the benchmark generates
+clustered data. Untested, and recorded as a hypothesis rather than a finding.
+
+**Talking point:** "Bounded degree is the algorithm, not a flaw, and it caps edges rather than
+entries -- nothing is freed, so it does not help memory at all. What it does cost is
+reachability on clustered data. I left it because at my measured scale it does not bite, but
+the interesting fix is not a patch: HNSW prunes on distance with no concept of how often an
+entry is served, which for a cache is arguably the wrong signal entirely."
 
 ---
 
