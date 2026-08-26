@@ -183,6 +183,48 @@ def test_restore_ignores_ids_that_do_not_follow_the_counter_format():
     assert router.cache_store.get("q_0") == "[stub response for: reset password]"
 
 
+def test_a_hit_with_no_stored_response_never_serves_none():
+    # The index and store can drift apart: the graph is snapshotted to
+    # disk while responses live elsewhere, so a restored snapshot beside a
+    # store missing those rows leaves ids in the index with nothing behind
+    # them. Returning the lookup regardless answers the user with None at
+    # similarity 1.0.
+    calls = []
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    router = CacheRouter(
+        "linear", embedder=embedder, cache_store=store, llm=counting_llm(calls)
+    )
+    # An orphan: in the index, absent from the store.
+    router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
+
+    result = router.route("reset password")
+
+    assert result.response == "real answer to: reset password"
+    assert result.response is not None
+    assert result.hit is False  # honest: this cost an LLM call
+    assert calls == ["reset password"]
+
+
+def test_an_orphaned_entry_is_healed_in_place_not_duplicated():
+    # Healing under the existing id matters: minting a new one would leave
+    # the orphan in the index to fail identically on every future query.
+    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
+    store = InMemoryCacheStore()
+    router = CacheRouter("linear", embedder=embedder, cache_store=store)
+    router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
+
+    router.route("reset password")
+
+    assert len(router.index) == 1  # no duplicate vector added
+    assert store.get("q_0") == "[stub response for: reset password]"
+
+    # The next identical query is now a clean hit with no LLM call.
+    second = router.route("reset password")
+    assert second.hit is True
+    assert second.matched_id == "q_0"
+
+
 def test_snapshot_roundtrips_the_index_and_serves_hits(tmp_path):
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()

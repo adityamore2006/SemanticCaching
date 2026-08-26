@@ -85,7 +85,13 @@ def build_router():
         kwargs["llm"] = llm
     router = CacheRouter("hnsw", embedder=embedder, **kwargs)
 
-    if router.load_snapshot(SNAPSHOT_PATH):
+    # The snapshot only holds the index. Responses live in the store, so
+    # restoring one without the other leaves ids in the graph that have no
+    # answer behind them. With a durable store both come back together;
+    # with the in-memory store the responses are gone, so loading a
+    # snapshot would guarantee that mismatch. CacheRouter.route() recovers
+    # from it either way, but there's no reason to manufacture it.
+    if durable and router.load_snapshot(SNAPSHOT_PATH):
         source = "snapshot"
     elif durable:
         router.restore(
@@ -93,7 +99,7 @@ def build_router():
         )
         source = "dynamodb"
     else:
-        source = "empty"
+        source = "empty (no CACHE_TABLE_NAME, nothing persists)"
 
     return router, source
 

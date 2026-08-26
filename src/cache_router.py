@@ -105,16 +105,39 @@ class CacheRouter:
         if len(self.index) > 0:
             matched_id, similarity = self.index.search(vector, k=1)[0]
             if similarity >= self.threshold:
-                return RouteResult(
-                    response=self.cache_store.get(matched_id),
-                    hit=True,
-                    matched_id=matched_id,
-                    similarity=similarity,
-                )
+                cached = self.cache_store.get(matched_id)
+                if cached is not None:
+                    return RouteResult(
+                        response=cached,
+                        hit=True,
+                        matched_id=matched_id,
+                        similarity=similarity,
+                    )
+                # The index and the store disagree: the index holds a
+                # vector under this id but the store has no response for
+                # it. Returning the cached value regardless would answer a
+                # user's question with None at high confidence, which is
+                # the project's central failure mode reached through
+                # bookkeeping rather than a bad threshold.
+                #
+                # The two can drift apart for real reasons: the graph is
+                # snapshotted to disk while responses live in a separate
+                # store, so a snapshot restored beside a store that lost
+                # or never had those rows leaves exactly this state. Rather
+                # than trust one side, regenerate and heal the entry in
+                # place below.
 
-        # Miss: either the index was empty, or the best match didn't
-        # clear the threshold.
+        # Miss: the index was empty, the best match didn't clear the
+        # threshold, or it cleared it but had no stored response.
         response = self.llm(query)
+        if matched_id is not None and similarity is not None and similarity >= self.threshold:
+            # Heal the orphaned entry under its existing id instead of
+            # minting a new one. The index already holds a vector for this
+            # neighborhood, so adding a second would leave the orphan
+            # behind to fail the same way on every future query.
+            self.cache_store.put(matched_id, response, vector)
+            return RouteResult(response=response, hit=False, matched_id=matched_id, similarity=similarity)
+
         new_id = f"{ID_PREFIX}{self._next_id}"
         self._next_id += 1
         self.index.insert(new_id, vector)
