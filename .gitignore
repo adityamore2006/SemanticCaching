@@ -4,3 +4,24 @@ __pycache__/
 .pytest_cache/
 .aws-sam/
 samconfig.toml
+
+# Secrets. Nothing matching these has ever been in this repo (the SSH key
+# for the instance lives in ~/.ssh, outside it), and these lines exist so
+# that stays true by accident-proofing rather than by discipline.
+#
+# Note what is deliberately NOT needed here: there is no AWS credentials
+# file to ignore, because the deployed instance authenticates with an IAM
+# role rather than a copied access key. See infra/README.md.
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+credentials
+aws-credentials*
+id_rsa*
+
+# Local runtime artifacts
+*.pkl
+graph.pkl
