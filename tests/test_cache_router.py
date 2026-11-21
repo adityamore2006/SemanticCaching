@@ -304,7 +304,7 @@ def test_seed_refuses_an_empty_answer():
 
 def test_an_empty_llm_response_is_never_cached():
     # The failure this prevents: "" is not None, so a cached empty answer
-    # passes the orphan check and is served as a confident HIT to every
+    # passes the hit check and is served as a confident HIT to every
     # future paraphrase, permanently.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
@@ -349,32 +349,30 @@ def test_an_llm_that_raises_leaves_the_cache_untouched():
     assert len(router.index) == 0
 
 
-def test_healing_an_orphan_with_an_empty_answer_writes_nothing():
-    # The orphan path writes under an id already in the index, so an empty
-    # answer there would put "" where a lookup will later find it and treat
-    # it as valid. The guard has to fire before that write, not after.
-    #
-    # Note the setup: the store is deliberately left empty so q_0 really is
-    # an orphan. Seeding it with a response would make this an ordinary hit
-    # that never reaches the LLM at all.
+def test_a_miss_writes_the_store_and_index_together():
+    # The invariant the orphan check used to paper over: every miss adds
+    # the same entry to both the store and the index, so they stay in step.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
-    router = CacheRouter(
-        "linear", embedder=embedder, cache_store=store, llm=lambda q: ""
-    )
-    router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
+    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
 
-    with pytest.raises(EmptyLLMResponse):
-        router.route("reset password")
+    first = router.route("reset password")
 
-    assert store.get("q_0") is None  # no empty entry written
-    assert len(store) == 0
+    assert first.hit is False
+    assert len(store) == 1
+    assert len(router.index) == 1
+    assert store.get("q_0") == "[stub response for: reset password]"
+
+    second = router.route("reset password")
+    assert second.hit is True
+    assert second.matched_id == "q_0"
 
 
-def test_a_hit_with_no_stored_response_never_serves_none():
-    # The index and store can drift apart, leaving ids in the index with
-    # nothing behind them. Returning the lookup regardless would answer
-    # the user with None at similarity 1.0.
+def test_an_orphan_fails_loudly_and_never_serves_none():
+    # An id in the index with nothing in the store must not be answered
+    # with None at similarity 1.0, and must not be silently regenerated
+    # either: that would hide an inconsistent cache. It raises instead,
+    # before the LLM is called.
     calls = []
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
@@ -384,31 +382,12 @@ def test_a_hit_with_no_stored_response_never_serves_none():
     # An orphan: in the index, absent from the store.
     router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
 
-    result = router.route("reset password")
+    with pytest.raises(RuntimeError, match="q_0"):
+        router.route("reset password")
 
-    assert result.response == "real answer to: reset password"
-    assert result.response is not None
-    assert result.hit is False  # honest: this cost an LLM call
-    assert calls == ["reset password"]
-
-
-def test_an_orphaned_entry_is_healed_in_place_not_duplicated():
-    # Healing under the existing id matters: minting a new one would leave
-    # the orphan in the index to fail identically on every future query.
-    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    store = InMemoryCacheStore()
-    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
-    router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
-
-    router.route("reset password")
-
-    assert len(router.index) == 1  # no duplicate vector added
-    assert store.get("q_0") == "[stub response for: reset password]"
-
-    # The next identical query is now a clean hit with no LLM call.
-    second = router.route("reset password")
-    assert second.hit is True
-    assert second.matched_id == "q_0"
+    assert calls == []  # no LLM call
+    assert len(store) == 0  # nothing written
+    assert len(router.index) == 1  # the inconsistency is left visible
 
 
 def test_custom_threshold_is_respected():
