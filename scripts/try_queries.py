@@ -3,16 +3,16 @@ Fire a set of queries at a running cache and show what it decided.
 
 Meant for poking at the system by hand: the interesting behaviour is not
 "does it return something", it's *where* the threshold falls and which
-near-misses it refuses. Run against a seeded cache (scripts/seed_cache.py)
-so queries have something to match against.
+near-misses it refuses. Run against a seeded cache. A miss calls the
+configured LLM and caches the answer.
 
     python scripts/try_queries.py                       # the built-in tour
     python scripts/try_queries.py "your own question"   # one-off
-    python scripts/try_queries.py --url http://<ip>:8000
 """
 
 import argparse
 import json
+import urllib.error
 import urllib.request
 
 # Grouped by what each case is meant to prove, because a list of queries
@@ -60,7 +60,11 @@ def run(url, queries, header=None):
         print(f"\n{header}")
         print("-" * 78)
     for query in queries:
-        result = post(url, query)
+        try:
+            result = post(url, query)
+        except urllib.error.HTTPError as exc:
+            print(f"  ERROR {exc.code}   {query}\n          {exc.read().decode()[:120]}")
+            continue
         sim = f"{result['similarity']:.4f}" if result["similarity"] is not None else "n/a"
         verdict = "HIT " if result["hit"] else "MISS"
         print(f"  {verdict}  sim={sim:>7}  {result['latency_ms']:>7.1f}ms   {query}")

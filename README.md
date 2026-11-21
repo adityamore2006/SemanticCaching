@@ -64,55 +64,61 @@ Two real bugs surfaced only at scale, both found by measurement and fixed the sa
 
 ## Architecture
 
-One long-lived process holds everything: the embedding model, the HNSW graph, and the hit/miss
-decision. Three environment variables are the whole difference between running it on a laptop
-and running it deployed.
+One long-lived local process holds the embedding model, the HNSW graph, and the hit/miss
+decision. Entries persist in a SQLite file; the graph is rebuilt from it at startup.
 
 ```
 client -> FastAPI ---> embed (mpnet, in-process)
                   ---> search HNSW (in RAM)
                   ---> similarity >= 0.80 ?
                          yes -> return stored answer        (no model call)
-                         no  -> Bedrock (Claude Haiku) -> store -> return
+                         no  -> LLM -> write SQLite -> insert in index -> return
 ```
 
-| Variable | Unset | Set |
-|---|---|---|
-| `CACHE_TABLE_NAME` | in-memory, nothing persists | DynamoDB, plus graph snapshot to disk |
-| `LLM_MODEL_ID` | a miss returns 501 | Bedrock answers, capped per day |
-| `RESET_TOKEN` | reset endpoint disabled | one-command reset to the seeded corpus |
+Every part behind a seam is swappable: `VectorIndex` (linear, hnsw), `Embedder`, `CacheStore`
+(in-memory, SQLite) and `LLM` (OpenAI-compatible HTTP, fake). Each has a small factory.
 
-Deployed on AWS via CloudFormation: EC2, DynamoDB on-demand, least-privilege IAM, an EventBridge
-nightly auto-stop, and a budget action that stops the instance on overspend. Roughly $2-3/month
-at demo usage, since the instance is stopped when idle.
+The embedder decides hit or miss on every request, so the 0.80 threshold belongs to it. The LLM
+only runs on a miss and does not affect the threshold. Changing the embedder means re-deriving
+the threshold with `eval/threshold_sweep.py`.
 
-**A serverless design was built first and then rejected**, which is documented rather than
-buried. Lambda recycles idle containers on its own schedule, so an unpredictable multi-second
-cold start lands on an arbitrary request, and that is the one thing a latency-focused cache
-cannot absorb. Keeping a Lambda warm costs about $21.90/month against $2.30/month for an
-instance that stops when idle.
+An earlier version was deployed to AWS (EC2, DynamoDB, Bedrock). That code is removed; the
+decisions and measurements from that phase are kept in `knowledge/learned.md`, and the code is
+in git history.
 
 ## Running it
 
+Needs [Ollama](https://ollama.com) with a model pulled for the miss path (any model works):
+
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+ollama pull qwen2.5:7b-instruct
 
-cd src && ../.venv/bin/uvicorn api:app --port 8000
+cd src && ../.venv/bin/python -m uvicorn api:app --port 8000
 ```
 
-Open http://127.0.0.1:8000 for the demo page, or http://127.0.0.1:8000/docs for the API. The
-cache seeds itself with 67 curated support answers on first start, so it can demonstrate a hit
-immediately.
+Open http://127.0.0.1:8000 for the demo page, or http://127.0.0.1:8000/docs for the API. On
+first start it seeds 67 curated support answers into `data/cache.db`, so a hit works
+immediately. A question not in the cache goes to the LLM, and the answer is cached.
+
+| Variable | Default | |
+|---|---|---|
+| `CACHE_DB_PATH` | `data/cache.db` | SQLite file |
+| `LLM_BACKEND` | `openai_compat` | or `fake` (no model, for tests) |
+| `LLM_MODEL` | `qwen2.5:7b-instruct` | any model the server has |
+| `LLM_BASE_URL` | `http://localhost:11434/v1` | Ollama; any OpenAI-compatible server works |
+| `LLM_API_KEY` | none | for hosted providers |
+| `OPERATING_THRESHOLD` | `0.80` | |
+| `RESET_TOKEN` | unset | enables `POST /admin/reset` |
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 82 tests
-.venv/bin/python scripts/try_queries.py       # labelled behaviour tour
+.venv/bin/python -m pytest tests/ -q          # no Ollama needed
+.venv/bin/python scripts/try_queries.py       # labelled behaviour tour of a running service
 .venv/bin/python eval/threshold_sweep.py      # regenerate the threshold table
 ```
 
-No AWS account is needed for any of the above. Without `LLM_MODEL_ID` a genuinely new question
-returns 501 rather than a placeholder, which is deliberate: a cache writes down whatever it is
-given and replays it forever, so a fabricated answer would become permanent.
+If the LLM is unreachable, a miss returns 503 (or 504 on a timeout) and nothing is cached,
+because a cache replays whatever it stores.
 
 ## Layout
 
@@ -121,10 +127,12 @@ given and replays it forever, so a fabricated answer would become permanent.
 | `src/hnsw.py` | The HNSW index, written from scratch |
 | `src/linear_search.py` | Brute force, kept permanently as the ground truth HNSW is graded against |
 | `src/cache_router.py` | The hit/miss decision the whole project builds toward |
-| `src/api.py` | HTTP entry point, the deployed system |
+| `src/sqlite_cache_store.py` | Durable storage; the index is rebuilt from it at startup |
+| `src/llm.py` and backends | The pluggable LLM interface (`openai_compat_llm.py`, `fake_llm.py`) |
+| `src/api.py` | HTTP entry point |
 | `eval/` | Threshold sweep, recall/latency benchmarks, collision verification |
 | `data/eval_pairs.json` | The 194-pair labeled evaluation set |
-| `infra/` | CloudFormation stack and deployment guide |
+| `TODO.md` | What is planned next, and what is deliberately deferred |
 | `knowledge/learned.md` | **28 documented decisions, tradeoffs, and debugging stories** |
 
 ## The reasoning
@@ -141,6 +149,7 @@ made, what the alternatives were, and where measurements contradicted the hypoth
 
 ## Status
 
-Complete and running. The miss path calls Bedrock, which is pending an AWS quota grant on a new
-account; until then a miss is refused rather than answered, and everything else (embedding,
-search, threshold, hit/miss, storage, reset) works.
+Runs fully locally: embedding, search, threshold, hit/miss, an Ollama-backed miss path, SQLite
+persistence and reset all work, and the tests pass. Not built yet: the concurrency and
+reliability layer, which is the next stage (see `TODO.md`). Known limitation: nothing protects
+the cache from concurrent requests yet, so simultaneous identical misses each call the LLM.

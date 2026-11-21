@@ -1,22 +1,15 @@
 """
-Restore the cache to the canonical corpus, in one command.
+Restore the running cache to the curated corpus, in one command.
 
-    python scripts/reset_cache.py                            # localhost
-    python scripts/reset_cache.py --url http://<ip>:8000     # deployed
+    python scripts/reset_cache.py                        # localhost:8000
+    python scripts/reset_cache.py --url http://host:8000
 
-Needs the service's RESET_TOKEN, via --token or $RESET_TOKEN.
+Needs the service's RESET_TOKEN, via --token or $RESET_TOKEN, and the service
+must be started with the same token or the endpoint stays disabled.
 
-Why this talks to the running service instead of to DynamoDB directly:
-the in-memory HNSW index is the thing that actually has to be cleared, and
-only the service holds it. Deleting rows from the table from outside leaves
-the running index intact, so the cache keeps serving entries that no longer
-exist in storage. The service can do all three parts atomically -- clear
-storage, delete the on-disk snapshot, rebuild and re-seed -- which is why
-reset is an endpoint rather than a script that pokes at AWS.
-
-The script verifies rather than trusting the response. A reset that reports
-success while leaving the cache wrong is the failure actually worth
-catching, so it re-reads the state afterwards and probes behaviour.
+It talks to the running service rather than editing the database file,
+because the in-memory index is also part of the cache and only the service
+holds it. It verifies the result instead of trusting the response.
 """
 
 import argparse
@@ -30,11 +23,9 @@ CANONICAL_PATH = os.path.join(
     os.path.dirname(__file__), "..", "data", "seed_answers.json"
 )
 
-# One question that should be served from the corpus, and one that should
-# not be answerable at all. Together they check the reset restored a
-# working cache rather than merely an empty one.
+# A question the curated corpus should answer, to check the reset restored a
+# working cache rather than merely a full one.
 KNOWN_QUESTION = "Is it possible to combine my two separate accounts?"
-UNKNOWN_QUESTION = "zxqv unrelated nonsense question that is not cached"
 
 
 def request(url, method="GET", body=None, headers=None, timeout=180):
@@ -87,8 +78,7 @@ def main():
             sys.exit("token rejected: it must match the service's RESET_TOKEN")
         sys.exit(f"reset failed ({exc.code}): {exc.read().decode()[:200]}")
 
-    print(f"  removed {result['removed']}, restored {result['restored']}"
-          f", snapshot deleted: {result['snapshot_deleted']}")
+    print(f"  removed {result['removed']}, restored {result['restored']}")
 
     # Everything below is verification. The reset already reported success;
     # this is checking whether that report was true.
@@ -102,31 +92,13 @@ def main():
     if not hit["hit"]:
         failures.append(f"a seeded question missed (similarity {hit['similarity']})")
 
-    # Should be unanswerable rather than served or silently cached.
-    try:
-        _, served = request(
-            f"{base}/query", method="POST", body={"query": UNKNOWN_QUESTION}
-        )
-        if served["hit"]:
-            failures.append("an unknown question was served from cache")
-    except urllib.error.HTTPError as exc:
-        if exc.code not in (429, 501, 503):
-            failures.append(f"unknown question gave an unexpected {exc.code}")
-
-    _, final = request(f"{base}/stats")
-    if final["entries"] != expected:
-        failures.append(
-            f"entry count drifted to {final['entries']} after probing; "
-            "something is still being cached that should not be"
-        )
-
     if failures:
         print("\nreset reported success but verification failed:")
         for f in failures:
             print(f"  - {f}")
         sys.exit(1)
 
-    print(f"  verified: {expected} entries, seeded question hits, unknown question refused")
+    print(f"  verified: {expected} entries, seeded question hits")
 
 
 if __name__ == "__main__":

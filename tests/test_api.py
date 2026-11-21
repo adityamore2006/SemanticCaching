@@ -1,9 +1,9 @@
 """
-Reset behaviour at the HTTP boundary.
+The HTTP boundary: queries, error mapping, persistence, reset.
 
 Exercises api.py through TestClient rather than calling CacheRouter
 directly, because the parts most likely to break are the ones only the
-endpoint touches: the auth gate, the snapshot file, and rebuilding the
+endpoint touches: the auth gate and rebuilding the
 router in place.
 """
 
@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import api
+from llm import LLMError, LLMTimeout
 
 CORPUS = [
     ("How do I reset my password?", "Use the forgot password link."),
@@ -37,11 +38,11 @@ class FakeEmbedder:
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """An app wired to a fake embedder, an answering LLM, and a snapshot
-    path under tmp_path, so tests never touch the real model or disk."""
+    """An app wired to a fake embedder, and an answering LLM, so tests never
+    touch the real model."""
     monkeypatch.setattr(api, "SentenceTransformerEmbedder", FakeEmbedder)
     monkeypatch.setattr(api, "load_seed_answers", lambda *a, **k: list(CORPUS))
-    monkeypatch.setattr(api, "SNAPSHOT_PATH", str(tmp_path / "graph.pkl"))
+    monkeypatch.setattr(api, "CACHE_DB_PATH", str(tmp_path / "cache.db"))
     monkeypatch.setattr(api, "RESET_TOKEN", "test-token")
     monkeypatch.setattr(api, "_build_llm", lambda: lambda q: f"fresh answer to {q}")
     with TestClient(api.app) as c:
@@ -82,21 +83,6 @@ def test_reset_keeps_the_corpus_answerable(client):
     assert result["response"] == CORPUS[0][1]
 
 
-def test_reset_deletes_the_snapshot_so_a_restart_cannot_undo_it(client, tmp_path):
-    # The subtle failure this guards: reset clears storage and memory, but
-    # leaves the on-disk graph. The next boot loads that stale snapshot and
-    # silently restores everything the reset removed.
-    snapshot = tmp_path / "graph.pkl"
-    client.post("/query", json={"query": "junk that should not survive"})
-    api.state["router"].save_snapshot(str(snapshot))
-    assert snapshot.exists()
-
-    body = client.post("/admin/reset", headers={"X-Reset-Token": "test-token"}).json()
-
-    assert body["snapshot_deleted"] is True
-    assert not snapshot.exists()
-
-
 def test_reset_requires_the_token(client):
     client.post("/query", json={"query": "junk"})
     polluted = entries(client)
@@ -124,3 +110,71 @@ def test_reset_zeroes_the_hit_counters(client):
     stats = client.get("/stats").json()
     assert stats["requests"] == 0
     assert stats["hits"] == 0 and stats["misses"] == 0
+
+
+def _raising(exc):
+    def llm(query):
+        raise exc
+    return llm
+
+
+def test_llm_failure_is_a_503_and_nothing_is_cached(client, monkeypatch):
+    monkeypatch.setattr(api.state["router"], "llm", _raising(LLMError("model down")))
+    before = entries(client)
+
+    response = client.post("/query", json={"query": "a brand new question"})
+
+    assert response.status_code == 503
+    assert "model down" in response.json()["detail"]
+    assert entries(client) == before
+
+
+def test_llm_timeout_is_a_504(client, monkeypatch):
+    monkeypatch.setattr(api.state["router"], "llm", _raising(LLMTimeout("too slow")))
+    assert client.post("/query", json={"query": "another new question"}).status_code == 504
+
+
+def test_a_cached_answer_survives_an_app_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "SentenceTransformerEmbedder", FakeEmbedder)
+    monkeypatch.setattr(api, "load_seed_answers", lambda *a, **k: list(CORPUS))
+    monkeypatch.setattr(api, "CACHE_DB_PATH", str(tmp_path / "cache.db"))
+    monkeypatch.setattr(api, "_build_llm", lambda: lambda q: f"fresh answer to {q}")
+
+    with TestClient(api.app) as first:
+        assert first.post("/query", json={"query": "ask me once"}).json()["hit"] is False
+        assert first.get("/stats").json()["entries"] == len(CORPUS) + 1
+
+    # New app lifespan, same database file: no re-seeding, nothing lost.
+    monkeypatch.setattr(api, "_build_llm", lambda: _raising(LLMError("must not be called")))
+    with TestClient(api.app) as second:
+        assert second.get("/stats").json()["entries"] == len(CORPUS) + 1
+        result = second.post("/query", json={"query": "ask me once"}).json()
+        assert result["hit"] is True
+        assert result["response"] == "fresh answer to ask me once"
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", " yes ", "on"])
+def test_parse_bool_accepts_true_spellings(raw):
+    assert api.parse_bool(raw, "X") is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "False", "no", "off"])
+def test_parse_bool_accepts_false_spellings(raw):
+    assert api.parse_bool(raw, "X") is False
+
+
+@pytest.mark.parametrize("raw", ["flase", "", "2", "maybe"])
+def test_parse_bool_rejects_anything_else(raw):
+    with pytest.raises(ValueError, match="X="):
+        api.parse_bool(raw, "X")
+
+
+def test_env_bool_uses_default_when_unset(monkeypatch):
+    monkeypatch.delenv("SOME_FLAG", raising=False)
+    assert api.env_bool("SOME_FLAG", default=True) is True
+    assert api.env_bool("SOME_FLAG", default=False) is False
+
+
+def test_env_bool_reads_the_variable(monkeypatch):
+    monkeypatch.setenv("SOME_FLAG", "false")
+    assert api.env_bool("SOME_FLAG", default=True) is False
