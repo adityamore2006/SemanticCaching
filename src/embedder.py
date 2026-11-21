@@ -1,26 +1,14 @@
 """
-The embedder contract.
+The embedder contract: text in, fixed-length vector out.
 
-Third instance of the same seam already used for VectorIndex (linear vs
-hnsw) and CacheStore (in-memory vs DynamoDB): callers depend on this
-interface, never on a concrete embedding backend, so swapping backends is
-a change at one factory call (see embedder_factory.py) rather than at
-every call site.
+Same seam as VectorIndex, CacheStore and LLM: callers depend on this
+interface, never on a concrete backend (see embedder_factory.py).
 
-Phase 6 is what forced this abstraction to exist. Until now there was
-exactly one implementation (sentence-transformers, running locally), so
-an interface would have been decoration. Deploying to Lambda added a
-second: sentence-transformers plus torch is ~2GB, far past a zip-packaged
-Lambda's limit, so the deployed system embeds via Bedrock instead.
-
-The critical thing this interface does NOT promise, and the reason it's
-worth stating here rather than discovering later: two implementations of
-this contract do not produce comparable vectors. Different models mean
-different dimensionality and a different vector space entirely, so an
-index built with one embedder is meaningless to another, and the
-operating threshold (knowledge/learned.md section 11) has to be re-derived
-per model rather than carried over. This was already documented as a known
-limit in section 9 before Phase 6 made it a live concern.
+What this interface does NOT promise: two embedders do not produce
+comparable vectors. A different model means a different dimension and a
+different vector space, so an index built with one is meaningless to
+another, and the operating threshold (knowledge/learned.md section 11) has
+to be re-derived per model, not carried over (section 9).
 """
 
 from abc import ABC, abstractmethod
