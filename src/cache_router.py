@@ -79,11 +79,18 @@ class CacheRouter:
             matched_id, similarity = self.index.search(vector, k=1)[0]
             if similarity >= self.threshold:
                 cached = self.cache_store.get(matched_id)
-                if cached is not None:
-                    return RouteResult(cached, hit=True, matched_id=matched_id, similarity=similarity)
-                # The index has this id but the store has no response for
-                # it. Serving None would be a confident wrong answer, so
-                # fall through, regenerate, and heal the entry in place.
+                if cached is None:
+                    # _add writes the store before the index, and restore
+                    # builds the index from the store, so a matched id with
+                    # no stored response means something outside those paths
+                    # changed the data. Serving None would be a confident
+                    # wrong answer, and papering over it hides the bug, so
+                    # fail loudly.
+                    raise RuntimeError(
+                        f"index has {matched_id!r} but the store has no response "
+                        "for it; the cache is inconsistent and needs a reset"
+                    )
+                return RouteResult(cached, hit=True, matched_id=matched_id, similarity=similarity)
 
         response = self.llm(query)
 
@@ -92,12 +99,7 @@ class CacheRouter:
         if not response or not str(response).strip():
             raise EmptyLLMResponse("llm returned an empty response; refusing to cache it")
 
-        if similarity is not None and similarity >= self.threshold:
-            # Healing an orphan: reuse its id rather than adding a second
-            # entry for the same neighborhood.
-            self.cache_store.put(matched_id, response, vector, source=SOURCE_LLM)
-        else:
-            self._add(query_vector=vector, response=response, source=SOURCE_LLM)
+        self._add(query_vector=vector, response=response, source=SOURCE_LLM)
         return RouteResult(response, hit=False, matched_id=matched_id, similarity=similarity)
 
     def seed(self, pairs) -> int:
