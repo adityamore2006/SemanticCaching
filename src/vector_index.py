@@ -20,6 +20,12 @@ the ground-truth answer key for HNSW's approximate results (Phase 3/4):
   - search on an empty index returns [].
   - a vector whose dimensionality != self.dim is a ValueError, not a
     silent wrong answer.
+
+Implementations are NOT thread-safe: insert() and search() must not run at
+the same time, from one thread or many. HNSW's insert() updates several
+structures one at a time, and a search that interleaves with it can read a
+half-updated graph. CacheRouter holds a lock around every call, so the
+index stays simple and the locking lives in one place.
 """
 
 from abc import ABC, abstractmethod

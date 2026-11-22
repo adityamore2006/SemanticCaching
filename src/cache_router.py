@@ -17,6 +17,7 @@ The threshold (0.80) was calibrated on all-mpnet-base-v2 (section 11); a
 different embedder needs its own threshold.
 """
 
+import threading
 from dataclasses import dataclass
 from typing import Callable, Hashable, Optional
 
@@ -69,14 +70,25 @@ class CacheRouter:
         self.threshold = threshold
         self.llm = llm
         self._next_id = 0
+        # Guards the id counter and the index. FastAPI runs route() on a pool
+        # of threads that all share this router, and the index is not
+        # thread-safe (see VectorIndex). Held only for in-memory work, never
+        # across the embedder, the LLM or a database write, so a slow model
+        # call cannot block other requests.
+        self._lock = threading.Lock()
+
+    def _nearest(self, vector):
+        """(id, similarity) of the closest entry, or (None, None) if empty."""
+        with self._lock:
+            if len(self.index) == 0:
+                return None, None
+            return self.index.search(vector, k=1)[0]
 
     def route(self, query: str) -> RouteResult:
         vector = self.embedder.embed(query)
 
-        matched_id = None
-        similarity = None
-        if len(self.index) > 0:
-            matched_id, similarity = self.index.search(vector, k=1)[0]
+        matched_id, similarity = self._nearest(vector)
+        if matched_id is not None:
             if similarity >= self.threshold:
                 cached = self.cache_store.get(matched_id)
                 if cached is None:
@@ -112,10 +124,9 @@ class CacheRouter:
                 raise EmptyLLMResponse(f"seed answer for {question!r} is empty; refusing to cache it")
 
             vector = self.embedder.embed(question)
-            if len(self.index) > 0:
-                _, similarity = self.index.search(vector, k=1)[0]
-                if similarity >= self.threshold:
-                    continue
+            _, similarity = self._nearest(vector)
+            if similarity is not None and similarity >= self.threshold:
+                continue
             self._add(query_vector=vector, response=answer, source=SOURCE_SEED)
             added += 1
         return added
@@ -124,7 +135,9 @@ class CacheRouter:
         """Rebuild the index from persisted (id, vector) pairs, returning how
         many were restored. Also resumes the id counter past the highest
         persisted id; otherwise a restarted router would reissue ids that
-        already exist and overwrite earlier entries."""
+        already exist and overwrite earlier entries.
+
+        Takes no lock: it runs at startup, before the router serves requests."""
         restored = 0
         highest = -1
         for entry_id, vector in entries:
@@ -141,8 +154,14 @@ class CacheRouter:
     def _add(self, query_vector, response, source) -> None:
         """Mint an id, write the store first, then the index. If the write
         fails nothing is half-added; if the process dies in between, the
-        row is rebuilt into the index at the next start."""
-        new_id = f"{ID_PREFIX}{self._next_id}"
-        self._next_id += 1
+        row is rebuilt into the index at the next start.
+
+        Three steps, and only two of them hold the lock. The store write is
+        a disk commit, so it runs outside: the store has its own lock, and
+        ids are unique, so concurrent writes cannot collide."""
+        with self._lock:
+            new_id = f"{ID_PREFIX}{self._next_id}"
+            self._next_id += 1
         self.cache_store.put(new_id, response, query_vector, source=source)
-        self.index.insert(new_id, query_vector)
+        with self._lock:
+            self.index.insert(new_id, query_vector)
