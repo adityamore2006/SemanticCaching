@@ -25,6 +25,7 @@ REQUESTS = "requests"          # every /query that reached the handler
 HITS = "hits"
 MISSES = "misses"             # asked the model itself
 COALESCED = "coalesced"       # shared the answer of an identical in-flight miss
+SHED = "shed"                 # refused at once because the miss path was full
 ERRORS_503 = "errors_503"      # model failed or returned nothing usable
 ERRORS_504 = "errors_504"      # model timed out
 ERRORS_500 = "errors_500"      # anything unexpected
@@ -35,7 +36,7 @@ MODEL_TIMEOUTS = "model_timeouts"
 # Latency kinds. "queue_wait" is the time a request waited for a free
 # worker thread before its handler started: the number that exposes a
 # saturated thread pool, which handler timing alone cannot see.
-LATENCY_KINDS = ("hit", "miss", "coalesced", "error", "model", "queue_wait")
+LATENCY_KINDS = ("hit", "miss", "coalesced", "shed", "error", "model", "queue_wait")
 
 
 def _percentile(sorted_values, p):
@@ -104,6 +105,7 @@ class Metrics:
                 "hits": hits,
                 "misses": misses,
                 "coalesced": coalesced,
+                "shed": counters[SHED],
                 "hit_rate": round(hits / answered, 4) if answered else None,
                 "errors_503": counters[ERRORS_503],
                 "errors_504": counters[ERRORS_504],

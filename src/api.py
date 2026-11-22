@@ -14,6 +14,9 @@ Configuration (environment variables, all optional):
     LLM_MODEL            model name             default qwen2.5:7b-instruct
     LLM_BASE_URL         API base URL           default http://localhost:11434/v1 (Ollama)
     LLM_API_KEY          bearer token, if the server wants one
+    LLM_TIMEOUT_SECONDS  give up on a model call after this long   default 30
+    MAX_CONCURRENT_MISSES  most requests allowed in the miss path at once;
+                         more are refused with 503 + Retry-After   default 24
     OPERATING_THRESHOLD  similarity threshold   default 0.80
     RESET_TOKEN          enables POST /admin/reset (404 if unset)
     SEED_ON_EMPTY        false to start with an empty cache   default true
@@ -30,6 +33,7 @@ from pydantic import BaseModel, Field
 
 import metrics as m
 from cache_router import CacheRouter, EmptyLLMResponse, OPERATING_THRESHOLD
+from limiter import Overloaded
 from llm import LLMError, LLMTimeout
 from llm_factory import create_llm
 from local_embedder import SentenceTransformerEmbedder
@@ -56,6 +60,37 @@ def parse_bool(raw, name):
     )
 
 
+def parse_positive_int(raw, name):
+    """Strict whole-number parse, at least 1. A cap of 0 would refuse every
+    request, and "2.5" or "many" is a typo worth stopping the boot over."""
+    text = raw.strip()
+    if text.isdigit() and int(text) >= 1:
+        return int(text)
+    raise ValueError(f"{name}={raw!r} is not a whole number of at least 1")
+
+
+def parse_positive_float(raw, name):
+    """Strict positive-number parse. Rejects zero, negatives, nan and inf:
+    a timeout of nan or inf silently means "never time out"."""
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        value = None
+    if value is None or not (0 < value < float("inf")):
+        raise ValueError(f"{name}={raw!r} is not a positive number")
+    return value
+
+
+def env_positive_int(name, default):
+    raw = os.environ.get(name)
+    return default if raw is None else parse_positive_int(raw, name)
+
+
+def env_positive_float(name, default):
+    raw = os.environ.get(name)
+    return default if raw is None else parse_positive_float(raw, name)
+
+
 def env_bool(name, default):
     """Read a boolean env var, falling back to `default` when unset."""
     raw = os.environ.get(name)
@@ -76,6 +111,21 @@ LLM_BACKEND = os.environ.get("LLM_BACKEND", "openai_compat")
 LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:7b-instruct")
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
 LLM_API_KEY = os.environ.get("LLM_API_KEY")
+
+# How long to wait on the model before giving up (504). This is the socket
+# timeout of the HTTP call, so it bounds each wait for the server's reply, not
+# a hard wall-clock deadline; for a non-streaming reply the two are the same
+# in practice. The backend's own default is 60 s, long enough for one stuck
+# model call to hold a worker thread for a full minute.
+LLM_TIMEOUT_SECONDS = env_positive_float("LLM_TIMEOUT_SECONDS", 30.0)
+
+# The most requests allowed in the miss path at once, counting both those
+# calling the model and those waiting on a shared call. Each holds one of the
+# server's worker threads (40 by default, shared by every endpoint), so this
+# is what keeps threads free for cache hits: with 24, at least 16 are always
+# available to them. Past the cap a miss is refused at once with a 503.
+MAX_CONCURRENT_MISSES = env_positive_int("MAX_CONCURRENT_MISSES", 24)
+RETRY_AFTER_SECONDS = 1
 
 # Enables POST /admin/reset. Unset means the endpoint does not exist at
 # all, which is the right default for an API reachable from anywhere:
@@ -112,7 +162,8 @@ def _build_llm():
     if LLM_BACKEND == "fake":
         return create_llm("fake")
     return create_llm(
-        LLM_BACKEND, model=LLM_MODEL, base_url=LLM_BASE_URL, api_key=LLM_API_KEY
+        LLM_BACKEND, model=LLM_MODEL, base_url=LLM_BASE_URL, api_key=LLM_API_KEY,
+        timeout=LLM_TIMEOUT_SECONDS,
     )
 
 
@@ -128,7 +179,8 @@ def build_router(store=None, embedder=None, metrics=None):
     if metrics is not None:
         llm = MeteredLLM(llm, metrics)
     router = CacheRouter(
-        "hnsw", embedder=embedder, llm=llm, cache_store=store, threshold=THRESHOLD
+        "hnsw", embedder=embedder, llm=llm, cache_store=store, threshold=THRESHOLD,
+        max_concurrent_misses=MAX_CONCURRENT_MISSES,
     )
     restored = router.restore((id, vector) for id, vector, _ in store.all_items())
 
@@ -226,6 +278,14 @@ def query(request: QueryRequest, http_request: Request):
         with metrics.in_flight():
             result = router.route(request.query)
         outcome = "hit" if result.hit else "coalesced" if result.coalesced else "miss"
+    except Overloaded as exc:
+        outcome = "shed"
+        metrics.incr(m.SHED)
+        raise HTTPException(
+            status_code=503,
+            detail=f"overloaded ({exc}); nothing was attempted, retry shortly",
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
+        )
     except LLMTimeout as exc:
         metrics.incr(m.ERRORS_504)
         raise HTTPException(status_code=504, detail=f"{exc}; nothing was cached")
@@ -266,7 +326,10 @@ async def health():
 async def metrics_endpoint():
     """Counters, in-flight gauge and recent latency percentiles as JSON."""
     snapshot = state["metrics"].snapshot()
-    snapshot["entries"] = len(state["router"].index)
+    router = state["router"]
+    snapshot["entries"] = len(router.index)
+    in_use, limit = router.miss_path()
+    snapshot["miss_path"] = {"in_use": in_use, "limit": limit}
     return snapshot
 
 

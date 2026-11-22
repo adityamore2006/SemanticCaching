@@ -108,6 +108,8 @@ immediately. A question not in the cache goes to the LLM, and the answer is cach
 | `LLM_MODEL` | `qwen2.5:7b-instruct` | any model the server has |
 | `LLM_BASE_URL` | `http://localhost:11434/v1` | Ollama; any OpenAI-compatible server works |
 | `LLM_API_KEY` | none | for hosted providers |
+| `LLM_TIMEOUT_SECONDS` | `30` | give up on a model call after this long (504) |
+| `MAX_CONCURRENT_MISSES` | `24` | most requests allowed in the miss path at once; more get a 503 with `Retry-After` |
 | `OPERATING_THRESHOLD` | `0.80` | |
 | `RESET_TOKEN` | unset | enables `POST /admin/reset` |
 
@@ -124,7 +126,9 @@ process: the cache lives in that process's memory, so extra `--workers` would ea
 own index and mint colliding ids against the same SQLite file.
 
 If the LLM is unreachable, a miss returns 503 (or 504 on a timeout) and nothing is cached,
-because a cache replays whatever it stores.
+because a cache replays whatever it stores. If too many misses are in flight at once
+(`MAX_CONCURRENT_MISSES`), the extra ones get an immediate 503 with `Retry-After: 1` and
+`/metrics` counts them as `shed`; cache hits are never refused for this reason.
 
 ## Layout
 
@@ -137,6 +141,7 @@ because a cache replays whatever it stores.
 | `src/llm.py` and backends | The pluggable LLM interface (`openai_compat_llm.py`, `fake_llm.py`) |
 | `src/api.py` | HTTP entry point |
 | `src/single_flight.py` | Lets identical concurrent misses share one model call |
+| `src/limiter.py` | A concurrency cap that refuses instead of waiting, used to keep worker threads free for hits |
 | `src/metrics.py`, `src/metered_llm.py` | Counters and latency percentiles; a wrapper that counts every model call |
 | `scripts/loadtest.py` | Repeatable concurrency scenarios, so each fix can be judged by measurement |
 | `eval/` | Threshold sweep, recall/latency benchmarks, collision verification |

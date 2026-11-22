@@ -258,3 +258,95 @@ def test_an_answer_stored_while_a_caller_was_getting_ready_is_found_not_regenera
 
     assert result.hit and result.response == "stored a moment ago"
     assert llm.calls == 0
+
+
+# --- load shedding: a cap on how many requests may be in the miss path ----
+
+from limiter import Overloaded  # noqa: E402
+
+
+def capped_router(limit, llm, prepopulate=YOUNG_CACHE):
+    router, store = make_router(prepopulate)
+    router.llm = llm
+    router._miss_limit = type(router._miss_limit)(limit)
+    return router, store
+
+
+def run_distinct(router, n, prefix="distinct"):
+    barrier = threading.Barrier(n)
+    outcomes = [None] * n
+    durations = [None] * n
+
+    def worker(i):
+        barrier.wait()
+        started = time.perf_counter()
+        try:
+            outcomes[i] = router.route(f"{prefix} question {i}")
+        except Exception as exc:  # noqa: BLE001
+            outcomes[i] = exc
+        durations[i] = time.perf_counter() - started
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return outcomes, durations
+
+
+def test_misses_beyond_the_cap_are_refused_at_once_not_queued():
+    llm = FakeLLM(latency=0.4)
+    router, store = capped_router(3, llm)
+
+    outcomes, durations = run_distinct(router, 10)
+
+    refused = [i for i, o in enumerate(outcomes) if isinstance(o, Overloaded)]
+    assert len(refused) == 7
+    assert llm.calls == 3  # the refused ones never reached the model
+    assert all(durations[i] < 0.2 for i in refused)  # and did not wait
+    assert len(store) == YOUNG_CACHE + 3  # nothing was cached for them
+
+
+def test_requests_waiting_on_a_shared_answer_count_toward_the_cap():
+    """A waiter holds a worker thread just as a model call does."""
+    llm = FakeLLM(latency=0.4)
+    router, store = capped_router(3, llm)
+
+    outcomes = run_identical(router, "one popular question", n=6)
+
+    assert llm.calls == 1
+    assert sum(isinstance(o, Overloaded) for o in outcomes) == 3
+    served = [o for o in outcomes if not isinstance(o, Exception)]
+    assert len(served) == 3 and sum(o.coalesced for o in served) == 2
+
+
+def test_cache_hits_are_never_affected_by_a_full_miss_path():
+    llm = FakeLLM(latency=0.6)
+    router, store = capped_router(2, llm)
+    router.seed([("a cached question", "a cached answer")])
+    assert router._miss_limit.in_use() == 0
+
+    background = threading.Thread(target=run_distinct, args=(router, 2, "slow"))
+    background.start()
+    deadline = time.perf_counter() + 2
+    while router._miss_limit.in_use() < 2 and time.perf_counter() < deadline:
+        time.sleep(0.01)
+    assert router._miss_limit.in_use() == 2  # the miss path is full
+
+    started = time.perf_counter()
+    result = router.route("a cached question")
+    elapsed = time.perf_counter() - started
+    background.join()
+
+    assert result.hit and result.response == "a cached answer"
+    assert elapsed < 0.2  # not stuck behind the 0.6 s model calls
+
+
+def test_slots_are_returned_after_failures_so_the_cap_does_not_leak():
+    router, store = capped_router(2, FakeLLM(error=LLMError("model down")))
+
+    for i in range(5):
+        with pytest.raises(LLMError):
+            router.route(f"failing question {i}")
+
+    assert router._miss_limit.in_use() == 0

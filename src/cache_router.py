@@ -24,6 +24,7 @@ from typing import Callable, Hashable, Optional
 from cache_store import CacheStore, InMemoryCacheStore
 from embedder import Embedder
 from factory import create_index
+from limiter import ConcurrencyLimit
 from single_flight import SingleFlight
 
 OPERATING_THRESHOLD = 0.80
@@ -73,6 +74,7 @@ class CacheRouter:
         llm: Callable[[str], str],
         cache_store: CacheStore = None,
         threshold: float = OPERATING_THRESHOLD,
+        max_concurrent_misses: Optional[int] = None,
         **index_params,
     ):
         self.embedder = embedder
@@ -91,6 +93,12 @@ class CacheRouter:
         self._lock = threading.Lock()
         # Identical concurrent misses share one model call.
         self._flights = SingleFlight()
+        # How many requests may be in the miss path at once, counting both
+        # the ones calling the model and the ones waiting on a shared call:
+        # each holds a worker thread. Past the cap, route() raises Overloaded
+        # immediately, so cache hits, which never touch this limit, always
+        # find a free thread. None means no cap.
+        self._miss_limit = ConcurrencyLimit(max_concurrent_misses)
 
     def _nearest(self, vector):
         """(id, similarity) of the closest entry, or (None, None) if empty."""
@@ -98,6 +106,10 @@ class CacheRouter:
             if len(self.index) == 0:
                 return None, None
             return self.index.search(vector, k=1)[0]
+
+    def miss_path(self):
+        """(in_use, limit) for the miss-path cap, for /metrics."""
+        return self._miss_limit.in_use(), self._miss_limit.limit
 
     def _lookup(self, vector):
         """Search the cache. Returns (hit, matched_id, similarity), where hit
@@ -130,8 +142,10 @@ class CacheRouter:
         # A miss. If an identical question is already waiting on the model,
         # share its answer instead of asking again. The lock inside
         # SingleFlight covers only the table lookup, never the model call, so
-        # different questions still run in parallel.
-        shared, led = self._flights.do(_flight_key(query), lambda: self._fill(query, vector))
+        # different questions still run in parallel. Entering the miss path
+        # takes a slot, or raises Overloaded straight away if the path is full.
+        with self._miss_limit.slot():
+            shared, led = self._flights.do(_flight_key(query), lambda: self._fill(query, vector))
 
         if not led:
             return RouteResult(
