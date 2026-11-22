@@ -298,3 +298,76 @@ def test_identical_concurrent_questions_share_one_model_call(tmp_path, monkeypat
         assert snapshot["requests"]["misses"] == 1
         assert snapshot["requests"]["coalesced"] == 9
         assert snapshot["entries"] == len(CORPUS) + 1
+
+
+# --- load shedding and timeouts ------------------------------------------
+
+
+def test_overload_is_a_fast_503_with_retry_after_and_is_counted_separately(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(api, "MAX_CONCURRENT_MISSES", 1)
+
+    def slow_llm(query):
+        time.sleep(0.5)
+        return "slow answer"
+
+    with _client_with_llm(tmp_path, monkeypatch, slow_llm) as c:
+        responses, elapsed = [], []
+        barrier = threading.Barrier(4)
+
+        def ask(i):
+            barrier.wait()
+            started = time.perf_counter()
+            responses.append(c.post("/query", json={"query": f"distinct new question {i}"}))
+            elapsed.append(time.perf_counter() - started)
+
+        threads = [threading.Thread(target=ask, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        statuses = sorted(r.status_code for r in responses)
+        assert statuses == [200, 503, 503, 503]
+        shed = [r for r in responses if r.status_code == 503]
+        assert all(r.headers["Retry-After"] == "1" for r in shed)
+        assert all("overloaded" in r.json()["detail"] for r in shed)
+
+        snapshot = metrics_of(c)
+        assert snapshot["requests"]["shed"] == 3
+        assert snapshot["requests"]["errors_503"] == 0  # shedding is not a model failure
+        assert snapshot["model"]["calls"] == 1
+        assert snapshot["entries"] == len(CORPUS) + 1  # only the served one was cached
+
+        # And a cached question is still answered normally.
+        assert c.post("/query", json={"query": CORPUS[0][0]}).json()["hit"] is True
+
+
+def test_model_timeout_setting_reaches_the_backend(monkeypatch):
+    monkeypatch.setattr(api, "LLM_BACKEND", "openai_compat")
+    monkeypatch.setattr(api, "LLM_TIMEOUT_SECONDS", 7.5)
+    assert api._build_llm().timeout == 7.5
+
+
+@pytest.mark.parametrize("raw", ["1", " 24 ", "100"])
+def test_parse_positive_int_accepts_whole_numbers(raw):
+    assert api.parse_positive_int(raw, "X") == int(raw)
+
+
+@pytest.mark.parametrize("raw", ["0", "-3", "2.5", "many", ""])
+def test_parse_positive_int_rejects_everything_else(raw):
+    with pytest.raises(ValueError, match="X="):
+        api.parse_positive_int(raw, "X")
+
+
+@pytest.mark.parametrize("raw,expected", [("30", 30.0), ("0.5", 0.5), (" 12.25 ", 12.25)])
+def test_parse_positive_float_accepts_positive_numbers(raw, expected):
+    assert api.parse_positive_float(raw, "X") == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "soon", ""])
+def test_parse_positive_float_rejects_everything_else(raw):
+    with pytest.raises(ValueError, match="X="):
+        api.parse_positive_float(raw, "X")

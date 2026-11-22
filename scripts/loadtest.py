@@ -142,19 +142,31 @@ def run(client, latency):
         lat = [r[1] for r in pool.map(client.query, (seed * 2)[:10])]
     line("cached question during flood", lat)
     print(f"  /health during flood: {health_ms:.0f}ms")
+    print("  (target: cached questions stay fast; the excess slow questions are refused)")
 
-    statuses = sorted({f.result()[0] for f in flood})
+    flood_results = [f.result() for f in flood]
     flood_pool.shutdown()
+    statuses = {}
+    for status, _, _ in flood_results:
+        statuses[status] = statuses.get(status, 0) + 1
+    shed_ms = [ms for status, ms, _ in flood_results if status == 503]
     after = client.metrics()
-    print(f"  flood finished, statuses {statuses}")
+    print(f"  flood outcomes: {dict(sorted(statuses.items()))}")
+    if shed_ms:
+        print(
+            f"  refused requests answered in p50={pct(shed_ms, 50):.0f}ms max={max(shed_ms):.0f}ms "
+            f"(waiting for the model would be {latency * 1000:.0f}ms)"
+        )
     print(
-        f"  server's own view: queue_wait p95 = {after['latency_ms']['queue_wait']['p95']}ms, "
+        f"  server's own view: shed = {after['requests']['shed']}, "
+        f"queue_wait p95 = {after['latency_ms']['queue_wait']['p95']}ms, "
         f"in_flight_peak = {after['in_flight_peak']}"
     )
     out["flood_hit_p50_ms"], out["flood_hit_max_ms"] = pct(lat, 50), max(lat)
     out["flood_health_ms"] = round(health_ms)
-    out["flood_statuses"] = statuses
+    out["flood_outcomes"] = {str(k): v for k, v in sorted(statuses.items())}
     out["flood_in_flight_peak"] = after["in_flight_peak"]
+    out["flood_queue_wait_p95_ms"] = after["latency_ms"]["queue_wait"]["p95"]
 
     print("\n6. Counter accuracy: 400 concurrent cached questions")
     before = client.metrics()["requests"]["total"]

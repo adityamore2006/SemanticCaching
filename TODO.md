@@ -8,10 +8,12 @@ removed (it is in git history, and its reasoning is in `knowledge/learned.md`).
 
 Real bugs reproduced in the audit. Done: the router lock (fix 1), `/metrics` plus
 `scripts/loadtest.py` (fix 2) and single-flight (fix 3: N identical concurrent misses make
-one LLM call). Still open:
+one LLM call) and the miss-path cap, model timeout and load shedding (fix 4: cached
+questions during a flood of 60 slow ones went from ~3.1 s to ~0.1 s). Still open:
 
-- No isolation: slow misses can starve hits (60 concurrent misses on a 3 s LLM raised hit
-  latency from ~35 ms to ~2.9 s). Needs a bulkhead, timeouts and load shedding.
+- Embedding runs on every request before the cap applies, so a burst of 60 simultaneous
+  requests still contends for CPU (~110 ms for a hit instead of ~17 ms). Fixing it means
+  bounding the embedder, not the miss path.
 - No usage cap on LLM calls (the old DynamoDB one was removed; rewrite it atomically).
 
 Stretch: circuit breaker, semantic single-flight, crash-consistent persistence.
