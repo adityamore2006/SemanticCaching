@@ -24,14 +24,17 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+import metrics as m
 from cache_router import CacheRouter, EmptyLLMResponse, OPERATING_THRESHOLD
 from llm import LLMError, LLMTimeout
 from llm_factory import create_llm
 from local_embedder import SentenceTransformerEmbedder
+from metered_llm import MeteredLLM
+from metrics import Metrics
 from sqlite_cache_store import SqliteCacheStore
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
@@ -92,7 +95,7 @@ SEED_ANSWERS_PATH = os.environ.get(
 # Set at startup. Module-level because a single long-lived process is the
 # whole point: this survives every request.
 state = {
-    "router": None, "hits": 0, "misses": 0,
+    "router": None, "metrics": None,
     "started_at": None, "boot_seconds": None,
 }
 
@@ -113,15 +116,19 @@ def _build_llm():
     )
 
 
-def build_router(store=None, embedder=None):
+def build_router(store=None, embedder=None, metrics=None):
     """Construct the router: open the store, rebuild the index from it, and
-    seed the curated corpus if the cache is empty."""
+    seed the curated corpus if the cache is empty. When `metrics` is given,
+    every model call is counted."""
     embedder = embedder or SentenceTransformerEmbedder()
     if store is None:
         store = SqliteCacheStore(CACHE_DB_PATH, embedder_id=embedder.model_name)
 
+    llm = _build_llm()
+    if metrics is not None:
+        llm = MeteredLLM(llm, metrics)
     router = CacheRouter(
-        "hnsw", embedder=embedder, llm=_build_llm(), cache_store=store, threshold=THRESHOLD
+        "hnsw", embedder=embedder, llm=llm, cache_store=store, threshold=THRESHOLD
     )
     restored = router.restore((id, vector) for id, vector, _ in store.all_items())
 
@@ -147,14 +154,14 @@ def load_seed_answers(path=SEED_ANSWERS_PATH):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     started = time.time()
-    router, source = build_router()
+    # A fresh Metrics per startup: the numbers describe the current run
+    # alongside uptime_seconds. Only observable when the app starts twice
+    # in one process (tests do; a deployed service gets a fresh module).
+    state["metrics"] = Metrics()
+    router, source = build_router(metrics=state["metrics"])
     state["router"] = router
     state["started_at"] = time.time()
     state["boot_seconds"] = round(time.time() - started, 2)
-    # These describe the current run alongside uptime_seconds, so startup
-    # zeroes them. Only observable when the app starts twice in one
-    # process (tests do; a deployed service gets a fresh module each time).
-    state["hits"] = state["misses"] = 0
     print(
         f"ready in {state['boot_seconds']}s  "
         f"{source}  entries={len(router.index)}  threshold={THRESHOLD}"
@@ -189,29 +196,52 @@ def reset(x_reset_token: str = Header(default=None)):
 
     store = state["router"].cache_store
     removed = store.clear()
-    router, source = build_router(store, state["router"].embedder)
+    router, source = build_router(store, state["router"].embedder, state["metrics"])
     state["router"] = router
-    state["hits"] = state["misses"] = 0
+    state["metrics"].reset()
 
     print(f"reset: removed {removed}, restored {len(router.index)} ({source})")
     return {"removed": removed, "restored": len(router.index), "source": source}
 
 
-@app.post("/query")
-def query(request: QueryRequest):
-    router = state["router"]
-    started = time.time()
+async def _stamp_arrival(request: Request):
+    """Record when the request arrived. Async on purpose: it runs on the
+    event loop immediately, before the sync handler is queued for a worker
+    thread, so (handler start - arrival) is exactly the time spent waiting
+    for a free thread."""
+    request.state.arrived = time.perf_counter()
 
+
+@app.post("/query", dependencies=[Depends(_stamp_arrival)])
+def query(request: QueryRequest, http_request: Request):
+    router = state["router"]
+    metrics = state["metrics"]
+    arrived = http_request.state.arrived
+
+    metrics.observe("queue_wait", (time.perf_counter() - arrived) * 1000)
+    metrics.incr(m.REQUESTS)
+
+    outcome = "error"
     try:
-        result = router.route(request.query)
+        with metrics.in_flight():
+            result = router.route(request.query)
+        outcome = "hit" if result.hit else "miss"
     except LLMTimeout as exc:
+        metrics.incr(m.ERRORS_504)
         raise HTTPException(status_code=504, detail=f"{exc}; nothing was cached")
     except (LLMError, EmptyLLMResponse) as exc:
+        metrics.incr(m.ERRORS_503)
         raise HTTPException(status_code=503, detail=f"{exc}; nothing was cached")
+    except Exception:
+        metrics.incr(m.ERRORS_500)
+        raise
+    finally:
+        # Measured from arrival, so it includes any wait for a worker
+        # thread: this is the latency a client actually experiences.
+        latency_ms = (time.perf_counter() - arrived) * 1000
+        metrics.observe(outcome, latency_ms)
 
-    latency_ms = (time.time() - started) * 1000
-
-    state["hits" if result.hit else "misses"] += 1
+    metrics.incr(m.HITS if result.hit else m.MISSES)
 
     return {
         "response": result.response,
@@ -222,17 +252,31 @@ def query(request: QueryRequest):
     }
 
 
+# async on purpose: these run on the event loop, not in the worker-thread
+# pool, so they still answer when every worker thread is busy with a slow
+# model call. A health check that queues behind the overload it is
+# supposed to report is no use.
 @app.get("/health")
-def health():
+async def health():
     return {"ok": state["router"] is not None}
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Counters, in-flight gauge and recent latency percentiles as JSON."""
+    snapshot = state["metrics"].snapshot()
+    snapshot["entries"] = len(state["router"].index)
+    return snapshot
 
 
 @app.get("/stats")
 def stats():
     """What the cache is actually doing, for the demo. Every hit is an
     LLM call that provably did not happen, which is the project's
-    cost-savings claim made countable rather than estimated."""
-    hits, misses = state["hits"], state["misses"]
+    cost-savings claim made countable rather than estimated. The fuller
+    operational picture is at /metrics."""
+    metrics = state["metrics"]
+    hits, misses = metrics.get(m.HITS), metrics.get(m.MISSES)
     total = hits + misses
     return {
         "entries": len(state["router"].index),
