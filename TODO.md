@@ -11,9 +11,10 @@ Real bugs reproduced in the audit. Done: the router lock (fix 1), `/metrics` plu
 one LLM call) and the miss-path cap, model timeout and load shedding (fix 4: cached
 questions during a flood of 60 slow ones went from ~3.1 s to ~0.1 s). Still open:
 
-- Embedding runs on every request before the cap applies, so a burst of 60 simultaneous
-  requests still contends for CPU (~110 ms for a hit instead of ~17 ms). Fixing it means
-  bounding the embedder, not the miss path.
+- Embedding runs on every request before the cap applies and is CPU-bound (16 ms alone,
+  ~455 ms each with 40 at once), so a burst still slows hits to ~110 ms instead of ~17 ms.
+  Capping embedding concurrency would not reduce the work; shedding earlier on total requests
+  in flight, a smaller embedder or batching might. See `knowledge/concurrency.md`.
 - No usage cap on LLM calls (the old DynamoDB one was removed; rewrite it atomically).
 
 Stretch: circuit breaker, semantic single-flight, crash-consistent persistence.

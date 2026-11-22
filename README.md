@@ -130,6 +130,22 @@ because a cache replays whatever it stores. If too many misses are in flight at 
 (`MAX_CONCURRENT_MISSES`), the extra ones get an immediate 503 with `Retry-After: 1` and
 `/metrics` counts them as `shed`; cache hits are never refused for this reason.
 
+## Under concurrent load
+
+Measured with a fake model that takes 3 seconds (real embedder, index and SQLite), 10-core
+laptop, synthetic traffic. Reproduce with `scripts/loadtest.py`.
+
+| | Before | After |
+|---|---|---|
+| 20 identical new questions at once: model calls | 20 | **1** |
+| 20 different new questions at once: total time | 3.3 s | 3.3 s |
+| A cached question while 60 slow questions run | 3.1 s | **0.11 s** |
+| Those 60 slow questions | all answered, over about 6 s | 24 answered, 36 refused at once (503) |
+| Entries lost or crashes, forced thread switching | 15 of 40 trials | 0 |
+
+The 0.11 s misses my own 100 ms target; the embedder is CPU-bound under a burst. The full
+account, including what is not fixed, is in [`knowledge/concurrency.md`](knowledge/concurrency.md).
+
 ## Layout
 
 | Path | |
@@ -150,6 +166,9 @@ because a cache replays whatever it stores. If too many misses are in flight at 
 | `knowledge/learned.md` | **28 documented decisions, tradeoffs, and debugging stories** |
 
 ## The reasoning
+
+`knowledge/concurrency.md` covers the concurrency work: four problems, the fix for each, and
+before and after numbers, including the target I missed.
 
 `knowledge/learned.md` is the part I would actually point at. It records why each decision was
 made, what the alternatives were, and where measurements contradicted the hypothesis, including:
