@@ -597,7 +597,7 @@ The first row is exactly what section 18 recorded. The demo had been passing on 
 
 **What changed.** The AWS deployment was deleted: the CloudFormation stack, the DynamoDB store,
 the Bedrock LLM and embedder, the usage limiter, and the systemd service file. It is in git history
-(last present at commit `580db6d`), and sections 16, 19, 20 and 23 to 23e still explain it.
+(last present at commit `40983f9`), and sections 16, 19, 20 and 23 to 23e still explain it.
 
 **Why.** The next work was concurrency: races, duplicate model calls, slow requests starving fast
 ones. None of that can be fixed without measuring it, and measuring needs a setup that is
