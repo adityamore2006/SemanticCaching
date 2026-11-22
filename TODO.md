@@ -6,17 +6,13 @@ removed (it is in git history, and its reasoning is in `knowledge/learned.md`).
 
 ## Next: infrastructure layer
 
-Real bugs reproduced in the audit, none fixed yet:
+Real bugs reproduced in the audit. Done: the router lock (fix 1) and `/metrics` plus
+`scripts/loadtest.py` (fix 2). Still open:
 
-- No locking anywhere. Concurrent requests race on index insert and id minting (a KeyError
-  under forced thread switching, duplicate ids).
 - No single-flight: N identical concurrent misses make N LLM calls and N duplicate entries.
 - No isolation: slow misses can starve hits (60 concurrent misses on a 3 s LLM raised hit
   latency from ~35 ms to ~2.9 s). Needs a bulkhead, timeouts and load shedding.
-- Hit/miss counters are not thread-safe.
 - No usage cap on LLM calls (the old DynamoDB one was removed; rewrite it atomically).
-- No `/metrics`, and no load generator to measure before and after (`FakeLLM` takes a
-  `latency` and an `error` for exactly this).
 
 Stretch: circuit breaker, semantic single-flight, crash-consistent persistence.
 

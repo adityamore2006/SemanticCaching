@@ -114,8 +114,14 @@ immediately. A question not in the cache goes to the LLM, and the answer is cach
 ```bash
 .venv/bin/python -m pytest tests/ -q          # no Ollama needed
 .venv/bin/python scripts/try_queries.py       # labelled behaviour tour of a running service
+.venv/bin/python scripts/loadtest.py          # concurrency scenarios against a slow fake model
 .venv/bin/python eval/threshold_sweep.py      # regenerate the threshold table
 ```
+
+`GET /metrics` returns request counts, model calls, an in-flight gauge and recent latency
+percentiles as JSON (`GET /stats` is the smaller view the demo page uses). Run one server
+process: the cache lives in that process's memory, so extra `--workers` would each build their
+own index and mint colliding ids against the same SQLite file.
 
 If the LLM is unreachable, a miss returns 503 (or 504 on a timeout) and nothing is cached,
 because a cache replays whatever it stores.
@@ -130,6 +136,8 @@ because a cache replays whatever it stores.
 | `src/sqlite_cache_store.py` | Durable storage; the index is rebuilt from it at startup |
 | `src/llm.py` and backends | The pluggable LLM interface (`openai_compat_llm.py`, `fake_llm.py`) |
 | `src/api.py` | HTTP entry point |
+| `src/metrics.py`, `src/metered_llm.py` | Counters and latency percentiles; a wrapper that counts every model call |
+| `scripts/loadtest.py` | Repeatable concurrency scenarios, so each fix can be judged by measurement |
 | `eval/` | Threshold sweep, recall/latency benchmarks, collision verification |
 | `data/eval_pairs.json` | The 194-pair labeled evaluation set |
 | `TODO.md` | What is planned next, and what is deliberately deferred |
@@ -150,6 +158,8 @@ made, what the alternatives were, and where measurements contradicted the hypoth
 ## Status
 
 Runs fully locally: embedding, search, threshold, hit/miss, an Ollama-backed miss path, SQLite
-persistence and reset all work, and the tests pass. Not built yet: the concurrency and
-reliability layer, which is the next stage (see `TODO.md`). Known limitation: nothing protects
-the cache from concurrent requests yet, so simultaneous identical misses each call the LLM.
+persistence and reset all work, and the tests pass. The router is safe to call from many
+threads, and `/metrics` plus `scripts/loadtest.py` measure the service under load. Not built
+yet: single-flight, timeouts, concurrency limits and load shedding (see `TODO.md`). Known
+limitations until then: simultaneous identical misses each call the LLM, and a burst of slow
+misses makes cached questions wait behind them.

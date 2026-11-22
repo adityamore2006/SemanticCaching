@@ -178,3 +178,86 @@ def test_env_bool_uses_default_when_unset(monkeypatch):
 def test_env_bool_reads_the_variable(monkeypatch):
     monkeypatch.setenv("SOME_FLAG", "false")
     assert api.env_bool("SOME_FLAG", default=True) is False
+
+
+# --- /metrics -----------------------------------------------------------
+
+
+def metrics_of(client):
+    return client.get("/metrics").json()
+
+
+def test_metrics_count_hits_misses_and_only_misses_call_the_model(client):
+    client.post("/query", json={"query": CORPUS[0][0]})      # hit
+    client.post("/query", json={"query": CORPUS[0][0]})      # hit
+    client.post("/query", json={"query": "something new"})   # miss
+
+    snapshot = metrics_of(client)
+
+    assert snapshot["requests"]["total"] == 3
+    assert snapshot["requests"]["hits"] == 2
+    assert snapshot["requests"]["misses"] == 1
+    assert snapshot["model"]["calls"] == 1
+    assert snapshot["entries"] == len(CORPUS) + 1
+
+
+def test_metrics_record_latency_and_queue_wait_per_request(client):
+    client.post("/query", json={"query": CORPUS[0][0]})
+    client.post("/query", json={"query": "something new"})
+
+    latency = metrics_of(client)["latency_ms"]
+
+    assert latency["hit"]["count"] == 1
+    assert latency["miss"]["count"] == 1
+    assert latency["model"]["count"] == 1
+    assert latency["queue_wait"]["count"] == 2
+
+
+def test_response_latency_covers_the_whole_request(client):
+    body = client.post("/query", json={"query": CORPUS[0][0]}).json()
+    recorded = metrics_of(client)["latency_ms"]["hit"]["max"]
+    # Same measurement, so the response and the metric agree (rounding aside).
+    assert abs(body["latency_ms"] - recorded) < 1.0
+
+
+def _client_with_llm(tmp_path, monkeypatch, llm):
+    monkeypatch.setattr(api, "SentenceTransformerEmbedder", FakeEmbedder)
+    monkeypatch.setattr(api, "load_seed_answers", lambda *a, **k: list(CORPUS))
+    monkeypatch.setattr(api, "CACHE_DB_PATH", str(tmp_path / "cache.db"))
+    monkeypatch.setattr(api, "_build_llm", lambda: llm)
+    return TestClient(api.app)
+
+
+def test_metrics_count_model_failures_and_timeouts(tmp_path, monkeypatch):
+    with _client_with_llm(tmp_path, monkeypatch, _raising(LLMError("down"))) as c:
+        assert c.post("/query", json={"query": "new one"}).status_code == 503
+        snapshot = metrics_of(c)
+        assert snapshot["requests"]["errors_503"] == 1
+        assert snapshot["model"]["errors"] == 1
+        assert snapshot["requests"]["misses"] == 0  # a failure is not a miss
+        assert snapshot["latency_ms"]["error"]["count"] == 1
+
+    with _client_with_llm(tmp_path, monkeypatch, _raising(LLMTimeout("slow"))) as c:
+        assert c.post("/query", json={"query": "new one"}).status_code == 504
+        snapshot = metrics_of(c)
+        assert snapshot["requests"]["errors_504"] == 1
+        assert snapshot["model"]["timeouts"] == 1
+
+
+def test_reset_zeroes_metrics_but_keeps_counting_model_calls(client):
+    client.post("/query", json={"query": "something new"})
+    client.post("/admin/reset", headers={"X-Reset-Token": "test-token"})
+    assert metrics_of(client)["model"]["calls"] == 0
+
+    # The rebuilt router still reports to the same Metrics.
+    client.post("/query", json={"query": "another new one"})
+    assert metrics_of(client)["model"]["calls"] == 1
+
+
+def test_health_and_metrics_do_not_use_the_worker_thread_pool():
+    # async def endpoints run on the event loop. Plain def endpoints queue
+    # for one of the 40 worker threads, so under a flood of slow model
+    # calls they would wait too. See the comment above /health in api.py.
+    import inspect
+    assert inspect.iscoroutinefunction(api.health)
+    assert inspect.iscoroutinefunction(api.metrics_endpoint)
