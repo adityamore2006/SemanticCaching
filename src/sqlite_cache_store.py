@@ -63,8 +63,13 @@ class SqliteCacheStore(CacheStore):
 
             self._responses = dict(self._conn.execute("SELECT id, response FROM entries"))
 
-    def put(self, id, response, vector=None, source=None):
-        blob = None if vector is None else np.asarray(vector, dtype=np.float32).tobytes()
+    def put(self, id, response, vector, source=None):
+        # Every entry needs a vector: all_items() is what rebuilds the index
+        # on restart, so a vectorless entry would be served by get() but
+        # never matchable again. Refuse it here rather than lose it later.
+        if vector is None:
+            raise ValueError(f"entry {id!r} has no vector; every stored entry needs one")
+        blob = np.asarray(vector, dtype=np.float32).tobytes()
         with self._lock:
             self._conn.execute(
                 "INSERT OR REPLACE INTO entries (id, response, vector, source, created_at)"
