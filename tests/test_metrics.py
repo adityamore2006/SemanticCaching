@@ -126,3 +126,15 @@ def test_metered_llm_separates_timeouts_from_other_errors_and_reraises():
     # A timeout is a call that failed, but it is counted once, as a timeout.
     assert snapshot["model"] == {"calls": 2, "errors": 1, "timeouts": 1}
     assert snapshot["latency_ms"]["model"]["count"] == 2
+
+
+def test_coalesced_requests_count_as_answered_but_not_as_hits():
+    metrics = Metrics()
+    metrics.incr(m.HITS, 1)
+    metrics.incr(m.MISSES, 1)
+    metrics.incr(m.COALESCED, 2)
+
+    requests = metrics.snapshot()["requests"]
+
+    assert requests["coalesced"] == 2
+    assert requests["hit_rate"] == 0.25  # 1 hit out of 4 answered

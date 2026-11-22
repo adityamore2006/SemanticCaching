@@ -23,7 +23,8 @@ WINDOW = 2000
 # Counter names, listed once so a typo in a call site is easy to spot.
 REQUESTS = "requests"          # every /query that reached the handler
 HITS = "hits"
-MISSES = "misses"
+MISSES = "misses"             # asked the model itself
+COALESCED = "coalesced"       # shared the answer of an identical in-flight miss
 ERRORS_503 = "errors_503"      # model failed or returned nothing usable
 ERRORS_504 = "errors_504"      # model timed out
 ERRORS_500 = "errors_500"      # anything unexpected
@@ -34,7 +35,7 @@ MODEL_TIMEOUTS = "model_timeouts"
 # Latency kinds. "queue_wait" is the time a request waited for a free
 # worker thread before its handler started: the number that exposes a
 # saturated thread pool, which handler timing alone cannot see.
-LATENCY_KINDS = ("hit", "miss", "error", "model", "queue_wait")
+LATENCY_KINDS = ("hit", "miss", "coalesced", "error", "model", "queue_wait")
 
 
 def _percentile(sorted_values, p):
@@ -92,8 +93,8 @@ class Metrics:
             in_flight, peak = self._in_flight, self._in_flight_peak
             uptime = time.time() - self._started
 
-        hits, misses = counters[HITS], counters[MISSES]
-        answered = hits + misses
+        hits, misses, coalesced = counters[HITS], counters[MISSES], counters[COALESCED]
+        answered = hits + misses + coalesced
         return {
             "uptime_seconds": round(uptime, 1),
             "in_flight": in_flight,
@@ -102,6 +103,7 @@ class Metrics:
                 "total": counters[REQUESTS],
                 "hits": hits,
                 "misses": misses,
+                "coalesced": coalesced,
                 "hit_rate": round(hits / answered, 4) if answered else None,
                 "errors_503": counters[ERRORS_503],
                 "errors_504": counters[ERRORS_504],

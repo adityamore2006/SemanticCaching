@@ -136,6 +136,7 @@ because a cache replays whatever it stores.
 | `src/sqlite_cache_store.py` | Durable storage; the index is rebuilt from it at startup |
 | `src/llm.py` and backends | The pluggable LLM interface (`openai_compat_llm.py`, `fake_llm.py`) |
 | `src/api.py` | HTTP entry point |
+| `src/single_flight.py` | Lets identical concurrent misses share one model call |
 | `src/metrics.py`, `src/metered_llm.py` | Counters and latency percentiles; a wrapper that counts every model call |
 | `scripts/loadtest.py` | Repeatable concurrency scenarios, so each fix can be judged by measurement |
 | `eval/` | Threshold sweep, recall/latency benchmarks, collision verification |
@@ -159,7 +160,7 @@ made, what the alternatives were, and where measurements contradicted the hypoth
 
 Runs fully locally: embedding, search, threshold, hit/miss, an Ollama-backed miss path, SQLite
 persistence and reset all work, and the tests pass. The router is safe to call from many
-threads, and `/metrics` plus `scripts/loadtest.py` measure the service under load. Not built
-yet: single-flight, timeouts, concurrency limits and load shedding (see `TODO.md`). Known
-limitations until then: simultaneous identical misses each call the LLM, and a burst of slow
-misses makes cached questions wait behind them.
+threads, identical concurrent misses share one model call, and `/metrics` plus
+`scripts/loadtest.py` measure the service under load. Not built yet: timeouts, concurrency
+limits and load shedding (see `TODO.md`). Known limitation until then: a burst of slow misses
+makes cached questions wait behind them.

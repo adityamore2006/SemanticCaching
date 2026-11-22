@@ -261,3 +261,40 @@ def test_health_and_metrics_do_not_use_the_worker_thread_pool():
     import inspect
     assert inspect.iscoroutinefunction(api.health)
     assert inspect.iscoroutinefunction(api.metrics_endpoint)
+
+
+def test_identical_concurrent_questions_share_one_model_call(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    calls = []
+
+    def slow_llm(query):
+        calls.append(query)
+        time.sleep(0.4)
+        return "one answer for everyone"
+
+    with _client_with_llm(tmp_path, monkeypatch, slow_llm) as c:
+        responses = []
+        barrier = threading.Barrier(10)
+
+        def ask():
+            barrier.wait()
+            responses.append(c.post("/query", json={"query": "a brand new question"}))
+
+        threads = [threading.Thread(target=ask) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(calls) == 1
+        assert [r.status_code for r in responses] == [200] * 10
+        assert {r.json()["response"] for r in responses} == {"one answer for everyone"}
+        assert sum(r.json()["coalesced"] for r in responses) == 9
+
+        snapshot = metrics_of(c)
+        assert snapshot["model"]["calls"] == 1
+        assert snapshot["requests"]["misses"] == 1
+        assert snapshot["requests"]["coalesced"] == 9
+        assert snapshot["entries"] == len(CORPUS) + 1

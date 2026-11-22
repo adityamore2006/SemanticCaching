@@ -113,7 +113,10 @@ def run(client, latency):
     print(f"  wall time {wall:.1f}s   statuses {sorted({r[0] for r in results})}")
     print(f"  model calls: {calls}   (ideal 1)")
     print(f"  entries added: {added}   (ideal 1)")
+    shared = after["requests"]["coalesced"] - before["requests"]["coalesced"]
+    print(f"  requests that shared another's answer: {shared}   (ideal 19)")
     out["identical_model_calls"], out["identical_entries_added"] = calls, added
+    out["identical_coalesced"] = shared
 
     print("\n4. 20 DIFFERENT new questions at the same moment")
     before = client.metrics()
