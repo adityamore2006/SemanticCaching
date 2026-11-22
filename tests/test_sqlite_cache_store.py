@@ -23,8 +23,9 @@ def test_put_then_get_roundtrips(db):
 
 def test_put_overwrites(db):
     store = SqliteCacheStore(db, "m")
-    store.put("a", "first")
-    store.put("a", "second")
+    v = np.array([1.0, 0.0], dtype=np.float32)
+    store.put("a", "first", v)
+    store.put("a", "second", v)
     assert store.get("a") == "second"
     assert len(store) == 1
 
@@ -42,10 +43,19 @@ def test_entries_and_exact_vectors_survive_a_reopen(db):
     assert np.array_equal(loaded, vector)  # bit-for-bit, not approximately
 
 
-def test_all_items_skips_entries_without_a_vector_and_keeps_insert_order(db):
+def test_put_refuses_an_entry_without_a_vector(db):
+    # A vectorless entry would be served by get() but never restored into
+    # the index, so it must not be written at all.
+    store = SqliteCacheStore(db, "m")
+    with pytest.raises(ValueError, match="no_vector"):
+        store.put("no_vector", "r", None)
+    assert len(store) == 0
+    assert store.get("no_vector") is None
+
+
+def test_all_items_returns_every_entry_in_insert_order(db):
     store = SqliteCacheStore(db, "m")
     store.put("q_0", "r0", np.array([1.0, 0.0], dtype=np.float32))
-    store.put("no_vector", "r")
     store.put("q_1", "r1", np.array([0.0, 1.0], dtype=np.float32))
     assert [i for i, _, _ in store.all_items()] == ["q_0", "q_1"]
 
