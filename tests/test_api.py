@@ -1,0 +1,373 @@
+"""
+The HTTP boundary: queries, error mapping, persistence, reset.
+
+Exercises api.py through TestClient rather than calling CacheRouter
+directly, because the parts most likely to break are the ones only the
+endpoint touches: the auth gate and rebuilding the
+router in place.
+"""
+
+import json
+
+import numpy as np
+import pytest
+from fastapi.testclient import TestClient
+
+import api
+from llm import LLMError, LLMTimeout
+
+CORPUS = [
+    ("How do I reset my password?", "Use the forgot password link."),
+    ("Can I merge two accounts into one?", "Settings then Account then Merge."),
+    ("How do I cancel my subscription?", "Settings then Billing then Cancel."),
+]
+
+
+class FakeEmbedder:
+    """Deterministic per-text vectors, so distinct questions never collide
+    and identical ones always match exactly."""
+
+    dim = 16
+    model_name = "fake-embedder"
+
+    def embed(self, text):
+        rng = np.random.default_rng(abs(hash(text)) % (2**32))
+        v = rng.normal(size=self.dim).astype(np.float32)
+        return v / np.linalg.norm(v)
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    """An app wired to a fake embedder, and an answering LLM, so tests never
+    touch the real model."""
+    monkeypatch.setattr(api, "SentenceTransformerEmbedder", FakeEmbedder)
+    monkeypatch.setattr(api, "load_seed_answers", lambda *a, **k: list(CORPUS))
+    monkeypatch.setattr(api, "CACHE_DB_PATH", str(tmp_path / "cache.db"))
+    monkeypatch.setattr(api, "RESET_TOKEN", "test-token")
+    monkeypatch.setattr(api, "_build_llm", lambda: lambda q: f"fresh answer to {q}")
+    with TestClient(api.app) as c:
+        yield c
+
+
+def entries(client):
+    return client.get("/stats").json()["entries"]
+
+
+def test_starts_seeded_from_the_canonical_corpus(client):
+    assert entries(client) == len(CORPUS)
+
+
+def test_reset_removes_junk_and_restores_canonical(client):
+    # Pollute the way a demo does: ask things that aren't cached, each of
+    # which gets answered and stored.
+    for junk in ["what is the best language", "write me a haiku", "weather today"]:
+        assert client.post("/query", json={"query": junk}).json()["hit"] is False
+    assert entries(client) == len(CORPUS) + 3
+
+    body = client.post("/admin/reset", headers={"X-Reset-Token": "test-token"}).json()
+
+    assert body["restored"] == len(CORPUS)
+    assert entries(client) == len(CORPUS)
+
+    # The junk is gone rather than merely uncounted: asking again misses.
+    assert client.post("/query", json={"query": "what is the best language"}).json()["hit"] is False
+
+
+def test_reset_keeps_the_corpus_answerable(client):
+    client.post("/query", json={"query": "junk"})
+    client.post("/admin/reset", headers={"X-Reset-Token": "test-token"})
+
+    result = client.post("/query", json={"query": CORPUS[0][0]}).json()
+
+    assert result["hit"] is True
+    assert result["response"] == CORPUS[0][1]
+
+
+def test_reset_requires_the_token(client):
+    client.post("/query", json={"query": "junk"})
+    polluted = entries(client)
+
+    assert client.post("/admin/reset").status_code == 401
+    assert client.post("/admin/reset", headers={"X-Reset-Token": "wrong"}).status_code == 401
+    assert entries(client) == polluted  # nothing happened
+
+
+def test_reset_is_invisible_when_no_token_is_configured(client, monkeypatch):
+    # Unset means the endpoint does not exist, rather than existing and
+    # refusing. An API reachable from anywhere should not advertise a
+    # cache-wipe endpoint it isn't willing to serve.
+    monkeypatch.setattr(api, "RESET_TOKEN", None)
+    assert client.post("/admin/reset", headers={"X-Reset-Token": "anything"}).status_code == 404
+
+
+def test_reset_zeroes_the_hit_counters(client):
+    client.post("/query", json={"query": CORPUS[0][0]})   # a hit
+    client.post("/query", json={"query": "something new"})  # a miss
+    assert client.get("/stats").json()["requests"] == 2
+
+    client.post("/admin/reset", headers={"X-Reset-Token": "test-token"})
+
+    stats = client.get("/stats").json()
+    assert stats["requests"] == 0
+    assert stats["hits"] == 0 and stats["misses"] == 0
+
+
+def _raising(exc):
+    def llm(query):
+        raise exc
+    return llm
+
+
+def test_llm_failure_is_a_503_and_nothing_is_cached(client, monkeypatch):
+    monkeypatch.setattr(api.state["router"], "llm", _raising(LLMError("model down")))
+    before = entries(client)
+
+    response = client.post("/query", json={"query": "a brand new question"})
+
+    assert response.status_code == 503
+    assert "model down" in response.json()["detail"]
+    assert entries(client) == before
+
+
+def test_llm_timeout_is_a_504(client, monkeypatch):
+    monkeypatch.setattr(api.state["router"], "llm", _raising(LLMTimeout("too slow")))
+    assert client.post("/query", json={"query": "another new question"}).status_code == 504
+
+
+def test_a_cached_answer_survives_an_app_restart(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "SentenceTransformerEmbedder", FakeEmbedder)
+    monkeypatch.setattr(api, "load_seed_answers", lambda *a, **k: list(CORPUS))
+    monkeypatch.setattr(api, "CACHE_DB_PATH", str(tmp_path / "cache.db"))
+    monkeypatch.setattr(api, "_build_llm", lambda: lambda q: f"fresh answer to {q}")
+
+    with TestClient(api.app) as first:
+        assert first.post("/query", json={"query": "ask me once"}).json()["hit"] is False
+        assert first.get("/stats").json()["entries"] == len(CORPUS) + 1
+
+    # New app lifespan, same database file: no re-seeding, nothing lost.
+    monkeypatch.setattr(api, "_build_llm", lambda: _raising(LLMError("must not be called")))
+    with TestClient(api.app) as second:
+        assert second.get("/stats").json()["entries"] == len(CORPUS) + 1
+        result = second.post("/query", json={"query": "ask me once"}).json()
+        assert result["hit"] is True
+        assert result["response"] == "fresh answer to ask me once"
+
+
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", " yes ", "on"])
+def test_parse_bool_accepts_true_spellings(raw):
+    assert api.parse_bool(raw, "X") is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "False", "no", "off"])
+def test_parse_bool_accepts_false_spellings(raw):
+    assert api.parse_bool(raw, "X") is False
+
+
+@pytest.mark.parametrize("raw", ["flase", "", "2", "maybe"])
+def test_parse_bool_rejects_anything_else(raw):
+    with pytest.raises(ValueError, match="X="):
+        api.parse_bool(raw, "X")
+
+
+def test_env_bool_uses_default_when_unset(monkeypatch):
+    monkeypatch.delenv("SOME_FLAG", raising=False)
+    assert api.env_bool("SOME_FLAG", default=True) is True
+    assert api.env_bool("SOME_FLAG", default=False) is False
+
+
+def test_env_bool_reads_the_variable(monkeypatch):
+    monkeypatch.setenv("SOME_FLAG", "false")
+    assert api.env_bool("SOME_FLAG", default=True) is False
+
+
+# --- /metrics -----------------------------------------------------------
+
+
+def metrics_of(client):
+    return client.get("/metrics").json()
+
+
+def test_metrics_count_hits_misses_and_only_misses_call_the_model(client):
+    client.post("/query", json={"query": CORPUS[0][0]})      # hit
+    client.post("/query", json={"query": CORPUS[0][0]})      # hit
+    client.post("/query", json={"query": "something new"})   # miss
+
+    snapshot = metrics_of(client)
+
+    assert snapshot["requests"]["total"] == 3
+    assert snapshot["requests"]["hits"] == 2
+    assert snapshot["requests"]["misses"] == 1
+    assert snapshot["model"]["calls"] == 1
+    assert snapshot["entries"] == len(CORPUS) + 1
+
+
+def test_metrics_record_latency_and_queue_wait_per_request(client):
+    client.post("/query", json={"query": CORPUS[0][0]})
+    client.post("/query", json={"query": "something new"})
+
+    latency = metrics_of(client)["latency_ms"]
+
+    assert latency["hit"]["count"] == 1
+    assert latency["miss"]["count"] == 1
+    assert latency["model"]["count"] == 1
+    assert latency["queue_wait"]["count"] == 2
+
+
+def test_response_latency_covers_the_whole_request(client):
+    body = client.post("/query", json={"query": CORPUS[0][0]}).json()
+    recorded = metrics_of(client)["latency_ms"]["hit"]["max"]
+    # Same measurement, so the response and the metric agree (rounding aside).
+    assert abs(body["latency_ms"] - recorded) < 1.0
+
+
+def _client_with_llm(tmp_path, monkeypatch, llm):
+    monkeypatch.setattr(api, "SentenceTransformerEmbedder", FakeEmbedder)
+    monkeypatch.setattr(api, "load_seed_answers", lambda *a, **k: list(CORPUS))
+    monkeypatch.setattr(api, "CACHE_DB_PATH", str(tmp_path / "cache.db"))
+    monkeypatch.setattr(api, "_build_llm", lambda: llm)
+    return TestClient(api.app)
+
+
+def test_metrics_count_model_failures_and_timeouts(tmp_path, monkeypatch):
+    with _client_with_llm(tmp_path, monkeypatch, _raising(LLMError("down"))) as c:
+        assert c.post("/query", json={"query": "new one"}).status_code == 503
+        snapshot = metrics_of(c)
+        assert snapshot["requests"]["errors_503"] == 1
+        assert snapshot["model"]["errors"] == 1
+        assert snapshot["requests"]["misses"] == 0  # a failure is not a miss
+        assert snapshot["latency_ms"]["error"]["count"] == 1
+
+    with _client_with_llm(tmp_path, monkeypatch, _raising(LLMTimeout("slow"))) as c:
+        assert c.post("/query", json={"query": "new one"}).status_code == 504
+        snapshot = metrics_of(c)
+        assert snapshot["requests"]["errors_504"] == 1
+        assert snapshot["model"]["timeouts"] == 1
+
+
+def test_reset_zeroes_metrics_but_keeps_counting_model_calls(client):
+    client.post("/query", json={"query": "something new"})
+    client.post("/admin/reset", headers={"X-Reset-Token": "test-token"})
+    assert metrics_of(client)["model"]["calls"] == 0
+
+    # The rebuilt router still reports to the same Metrics.
+    client.post("/query", json={"query": "another new one"})
+    assert metrics_of(client)["model"]["calls"] == 1
+
+
+def test_health_and_metrics_do_not_use_the_worker_thread_pool():
+    # async def endpoints run on the event loop. Plain def endpoints queue
+    # for one of the 40 worker threads, so under a flood of slow model
+    # calls they would wait too. See the comment above /health in api.py.
+    import inspect
+    assert inspect.iscoroutinefunction(api.health)
+    assert inspect.iscoroutinefunction(api.metrics_endpoint)
+
+
+def test_identical_concurrent_questions_share_one_model_call(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    calls = []
+
+    def slow_llm(query):
+        calls.append(query)
+        time.sleep(0.4)
+        return "one answer for everyone"
+
+    with _client_with_llm(tmp_path, monkeypatch, slow_llm) as c:
+        responses = []
+        barrier = threading.Barrier(10)
+
+        def ask():
+            barrier.wait()
+            responses.append(c.post("/query", json={"query": "a brand new question"}))
+
+        threads = [threading.Thread(target=ask) for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert len(calls) == 1
+        assert [r.status_code for r in responses] == [200] * 10
+        assert {r.json()["response"] for r in responses} == {"one answer for everyone"}
+        assert sum(r.json()["coalesced"] for r in responses) == 9
+
+        snapshot = metrics_of(c)
+        assert snapshot["model"]["calls"] == 1
+        assert snapshot["requests"]["misses"] == 1
+        assert snapshot["requests"]["coalesced"] == 9
+        assert snapshot["entries"] == len(CORPUS) + 1
+
+
+# --- load shedding and timeouts ------------------------------------------
+
+
+def test_overload_is_a_fast_503_with_retry_after_and_is_counted_separately(tmp_path, monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(api, "MAX_CONCURRENT_MISSES", 1)
+
+    def slow_llm(query):
+        time.sleep(0.5)
+        return "slow answer"
+
+    with _client_with_llm(tmp_path, monkeypatch, slow_llm) as c:
+        responses, elapsed = [], []
+        barrier = threading.Barrier(4)
+
+        def ask(i):
+            barrier.wait()
+            started = time.perf_counter()
+            responses.append(c.post("/query", json={"query": f"distinct new question {i}"}))
+            elapsed.append(time.perf_counter() - started)
+
+        threads = [threading.Thread(target=ask, args=(i,)) for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        statuses = sorted(r.status_code for r in responses)
+        assert statuses == [200, 503, 503, 503]
+        shed = [r for r in responses if r.status_code == 503]
+        assert all(r.headers["Retry-After"] == "1" for r in shed)
+        assert all("overloaded" in r.json()["detail"] for r in shed)
+
+        snapshot = metrics_of(c)
+        assert snapshot["requests"]["shed"] == 3
+        assert snapshot["requests"]["errors_503"] == 0  # shedding is not a model failure
+        assert snapshot["model"]["calls"] == 1
+        assert snapshot["entries"] == len(CORPUS) + 1  # only the served one was cached
+
+        # And a cached question is still answered normally.
+        assert c.post("/query", json={"query": CORPUS[0][0]}).json()["hit"] is True
+
+
+def test_model_timeout_setting_reaches_the_backend(monkeypatch):
+    monkeypatch.setattr(api, "LLM_BACKEND", "openai_compat")
+    monkeypatch.setattr(api, "LLM_TIMEOUT_SECONDS", 7.5)
+    assert api._build_llm().timeout == 7.5
+
+
+@pytest.mark.parametrize("raw", ["1", " 24 ", "100"])
+def test_parse_positive_int_accepts_whole_numbers(raw):
+    assert api.parse_positive_int(raw, "X") == int(raw)
+
+
+@pytest.mark.parametrize("raw", ["0", "-3", "2.5", "many", ""])
+def test_parse_positive_int_rejects_everything_else(raw):
+    with pytest.raises(ValueError, match="X="):
+        api.parse_positive_int(raw, "X")
+
+
+@pytest.mark.parametrize("raw,expected", [("30", 30.0), ("0.5", 0.5), (" 12.25 ", 12.25)])
+def test_parse_positive_float_accepts_positive_numbers(raw, expected):
+    assert api.parse_positive_float(raw, "X") == expected
+
+
+@pytest.mark.parametrize("raw", ["0", "-1", "nan", "inf", "soon", ""])
+def test_parse_positive_float_rejects_everything_else(raw):
+    with pytest.raises(ValueError, match="X="):
+        api.parse_positive_float(raw, "X")

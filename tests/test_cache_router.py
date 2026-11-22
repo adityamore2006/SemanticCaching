@@ -1,7 +1,8 @@
 import numpy as np
 import pytest
 
-from cache_router import CacheRouter, EmptyLLMResponse, LLMNotConfigured
+from cache_router import CacheRouter, EmptyLLMResponse
+from llm import LLMError
 from cache_store import InMemoryCacheStore
 
 
@@ -139,7 +140,7 @@ def test_an_empty_injected_cache_store_is_still_used():
 
 
 def test_restore_rebuilds_the_index_and_serves_hits_from_it():
-    # Simulates a Lambda cold start: a fresh router with an empty index,
+    # Simulates a restart: a fresh router with an empty index,
     # handed the vectors a previous container had persisted.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
@@ -191,7 +192,7 @@ def test_restore_ignores_ids_that_do_not_follow_the_counter_format():
 
 
 def refusing_llm(query):
-    raise LLMNotConfigured("no model configured")
+    raise LLMError("model unavailable")
 
 
 def test_llm_is_required_and_has_no_fabricating_default():
@@ -202,17 +203,16 @@ def test_llm_is_required_and_has_no_fabricating_default():
         CacheRouter("linear", embedder=embedder)
 
 
-def test_a_miss_with_no_model_caches_nothing():
-    # The bug this prevents, seen in the demo: a miss stored placeholder
-    # text, and asking the same question again returned it as a confident
-    # HIT at similarity 1.0 -- an answer that was never answered.
+def test_a_failed_model_call_caches_nothing():
+    # A failed call must not leave a placeholder behind that a later
+    # identical question would be served as a confident HIT.
     embedder = FakeEmbedder({"a new question": [1.0, 0.0]})
     store = InMemoryCacheStore()
     router = CacheRouter(
         "linear", embedder=embedder, cache_store=store, llm=refusing_llm
     )
 
-    with pytest.raises(LLMNotConfigured):
+    with pytest.raises(LLMError):
         router.route("a new question")
 
     assert len(store) == 0
@@ -220,14 +220,13 @@ def test_a_miss_with_no_model_caches_nothing():
 
     # And critically: asking again still misses, rather than hitting on
     # something the first attempt left behind.
-    with pytest.raises(LLMNotConfigured):
+    with pytest.raises(LLMError):
         router.route("a new question")
     assert len(router.index) == 0
 
 
-def test_seeded_answers_still_serve_hits_with_no_model():
-    # Refusing to answer new questions must not take the cache offline.
-    # Anything seeded keeps working, because a hit never needed a model.
+def test_seeded_answers_still_serve_hits_when_the_model_is_down():
+    # A model outage must not take the cache offline: a hit never needs it.
     embedder = FakeEmbedder({
         "reset password": [1.0, 0.0],
         "i forgot my password": [0.9, 0.435889894354067],
@@ -240,7 +239,7 @@ def test_seeded_answers_still_serve_hits_with_no_model():
     assert hit.hit is True
     assert hit.response == "Use the forgot password link."
 
-    with pytest.raises(LLMNotConfigured):
+    with pytest.raises(LLMError):
         router.route("something else entirely")
 
 
@@ -305,7 +304,7 @@ def test_seed_refuses_an_empty_answer():
 
 def test_an_empty_llm_response_is_never_cached():
     # The failure this prevents: "" is not None, so a cached empty answer
-    # passes the orphan check and is served as a confident HIT to every
+    # passes the hit check and is served as a confident HIT to every
     # future paraphrase, permanently.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
@@ -340,7 +339,7 @@ def test_an_llm_that_raises_leaves_the_cache_untouched():
     store = InMemoryCacheStore()
 
     def broken(query):
-        raise RuntimeError("bedrock is throttling")
+        raise RuntimeError("model is throttling")
 
     router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=broken)
 
@@ -350,34 +349,30 @@ def test_an_llm_that_raises_leaves_the_cache_untouched():
     assert len(router.index) == 0
 
 
-def test_healing_an_orphan_with_an_empty_answer_writes_nothing():
-    # The orphan path writes under an id already in the index, so an empty
-    # answer there would put "" where a lookup will later find it and treat
-    # it as valid. The guard has to fire before that write, not after.
-    #
-    # Note the setup: the store is deliberately left empty so q_0 really is
-    # an orphan. Seeding it with a response would make this an ordinary hit
-    # that never reaches the LLM at all.
+def test_a_miss_writes_the_store_and_index_together():
+    # The invariant the orphan check used to paper over: every miss adds
+    # the same entry to both the store and the index, so they stay in step.
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
-    router = CacheRouter(
-        "linear", embedder=embedder, cache_store=store, llm=lambda q: ""
-    )
-    router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
+    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
 
-    with pytest.raises(EmptyLLMResponse):
-        router.route("reset password")
+    first = router.route("reset password")
 
-    assert store.get("q_0") is None  # no empty entry written
-    assert len(store) == 0
+    assert first.hit is False
+    assert len(store) == 1
+    assert len(router.index) == 1
+    assert store.get("q_0") == "[stub response for: reset password]"
+
+    second = router.route("reset password")
+    assert second.hit is True
+    assert second.matched_id == "q_0"
 
 
-def test_a_hit_with_no_stored_response_never_serves_none():
-    # The index and store can drift apart: the graph is snapshotted to
-    # disk while responses live elsewhere, so a restored snapshot beside a
-    # store missing those rows leaves ids in the index with nothing behind
-    # them. Returning the lookup regardless answers the user with None at
-    # similarity 1.0.
+def test_an_orphan_fails_loudly_and_never_serves_none():
+    # An id in the index with nothing in the store must not be answered
+    # with None at similarity 1.0, and must not be silently regenerated
+    # either: that would hide an inconsistent cache. It raises instead,
+    # before the LLM is called.
     calls = []
     embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
     store = InMemoryCacheStore()
@@ -387,105 +382,12 @@ def test_a_hit_with_no_stored_response_never_serves_none():
     # An orphan: in the index, absent from the store.
     router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
 
-    result = router.route("reset password")
+    with pytest.raises(RuntimeError, match="q_0"):
+        router.route("reset password")
 
-    assert result.response == "real answer to: reset password"
-    assert result.response is not None
-    assert result.hit is False  # honest: this cost an LLM call
-    assert calls == ["reset password"]
-
-
-def test_an_orphaned_entry_is_healed_in_place_not_duplicated():
-    # Healing under the existing id matters: minting a new one would leave
-    # the orphan in the index to fail identically on every future query.
-    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    store = InMemoryCacheStore()
-    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
-    router.restore([("q_0", np.array([1.0, 0.0], dtype=np.float32))])
-
-    router.route("reset password")
-
-    assert len(router.index) == 1  # no duplicate vector added
-    assert store.get("q_0") == "[stub response for: reset password]"
-
-    # The next identical query is now a clean hit with no LLM call.
-    second = router.route("reset password")
-    assert second.hit is True
-    assert second.matched_id == "q_0"
-
-
-def test_snapshot_roundtrips_the_index_and_serves_hits(tmp_path):
-    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    store = InMemoryCacheStore()
-    router = CacheRouter("hnsw", embedder=embedder, cache_store=store, llm=stub_llm)
-    router.route("reset password")
-    path = tmp_path / "graph.pkl"
-    router.save_snapshot(path)
-
-    # A fresh process: same store, empty index until the snapshot loads.
-    revived = CacheRouter("hnsw", embedder=embedder, cache_store=store, llm=stub_llm)
-    assert len(revived.index) == 0
-    assert revived.load_snapshot(path) is True
-
-    result = revived.route("reset password")
-    assert result.hit is True
-    assert len(revived.index) == 1
-
-
-def test_snapshot_carries_the_id_counter(tmp_path):
-    # The section 22 failure, now via the snapshot path: restoring the
-    # graph without its counter would reissue q_0 over a live entry.
-    embedder = FakeEmbedder({
-        "reset password": [1.0, 0.0],
-        "change my email": [0.7, 0.7141428428542852],
-    })
-    store = InMemoryCacheStore()
-    router = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
-    router.route("reset password")  # mints q_0
-    path = tmp_path / "graph.pkl"
-    router.save_snapshot(path)
-
-    revived = CacheRouter("linear", embedder=embedder, cache_store=store, llm=stub_llm)
-    revived.load_snapshot(path)
-    revived.route("change my email")  # a miss, mints the next id
-
-    assert store.get("q_0") == "[stub response for: reset password]"
-    assert store.get("q_1") == "[stub response for: change my email]"
-
-
-def test_snapshot_from_a_different_embedding_model_is_rejected(tmp_path):
-    # Vectors only mean something in the space that produced them, so a
-    # snapshot built by another model is not stale, it is nonsense. Loading
-    # it would compare this model's queries against that model's vectors
-    # and serve confident garbage.
-    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("hnsw", embedder=embedder, llm=stub_llm)
-    router.route("reset password")
-    path = tmp_path / "graph.pkl"
-    router.save_snapshot(path)
-
-    other = FakeEmbedder({"reset password": [1.0, 0.0]})
-    other.model_name = "some-other-model"
-    revived = CacheRouter("hnsw", embedder=other, llm=stub_llm)
-
-    assert revived.load_snapshot(path) is False
-    assert len(revived.index) == 0  # left empty, caller falls back to the store
-
-
-def test_load_snapshot_returns_false_when_there_is_no_file(tmp_path):
-    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("hnsw", embedder=embedder, llm=stub_llm)
-    assert router.load_snapshot(tmp_path / "does-not-exist.pkl") is False
-
-
-def test_load_snapshot_returns_false_on_a_corrupt_file(tmp_path):
-    # A truncated or garbage snapshot must not crash startup: DynamoDB is
-    # the source of truth and rebuilding from it is always available.
-    path = tmp_path / "graph.pkl"
-    path.write_bytes(b"not a pickle")
-    embedder = FakeEmbedder({"reset password": [1.0, 0.0]})
-    router = CacheRouter("hnsw", embedder=embedder, llm=stub_llm)
-    assert router.load_snapshot(path) is False
+    assert calls == []  # no LLM call
+    assert len(store) == 0  # nothing written
+    assert len(router.index) == 1  # the inconsistency is left visible
 
 
 def test_custom_threshold_is_respected():

@@ -21,18 +21,11 @@ Nothing else here should need to change.
 Run against a specific embedding backend/model to compare it against
 prior runs:
     python eval/threshold_sweep.py                       # local, mpnet
-    python eval/threshold_sweep.py --embedder bedrock    # Titan V2
     python eval/threshold_sweep.py --model all-MiniLM-L6-v2
 
 Each run writes its own file under eval/results/<model_name>.json (so
 multiple models' results sit on disk side by side, nothing gets
 overwritten) and appends one summary row to eval/results/log.md.
-
-The --embedder flag is what Phase 6 needed: the deployed Lambda embeds via
-Bedrock rather than sentence-transformers, and a threshold does not carry
-across vector spaces (knowledge/learned.md section 9), so the deployed
-threshold has to be re-derived by running this exact harness, unchanged,
-against the other backend.
 """
 
 import argparse
@@ -165,9 +158,8 @@ def print_table(rows):
 
 
 def results_path_for(model_name):
-    # Bedrock model ids carry a version suffix ("...-v2:0"); the colon is
-    # legal in a filename but awkward to type and quote, so flatten it the
-    # same way the "/" in HuggingFace org-prefixed names already is.
+    # Flatten the "/" in HuggingFace org-prefixed names (and any ":") so the
+    # model name is a safe filename.
     slug = model_name.replace("/", "__").replace(":", "_")
     return os.path.join(RESULTS_DIR, f"{slug}.json")
 
@@ -205,8 +197,8 @@ def main():
     parser.add_argument(
         "--embedder",
         default="local",
-        choices=["local", "bedrock"],
-        help="embedding backend: local sentence-transformers, or Bedrock (what the Lambda deploys)",
+        choices=["local"],
+        help="embedding backend: local sentence-transformers",
     )
     parser.add_argument(
         "--model",

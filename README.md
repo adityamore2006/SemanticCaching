@@ -64,55 +64,132 @@ Two real bugs surfaced only at scale, both found by measurement and fixed the sa
 
 ## Architecture
 
-One long-lived process holds everything: the embedding model, the HNSW graph, and the hit/miss
-decision. Three environment variables are the whole difference between running it on a laptop
-and running it deployed.
+One long-lived local process holds the embedding model, the HNSW graph, and the hit/miss
+decision. Entries persist in a SQLite file; the graph is rebuilt from it at startup.
 
 ```
 client -> FastAPI ---> embed (mpnet, in-process)
                   ---> search HNSW (in RAM)
                   ---> similarity >= 0.80 ?
                          yes -> return stored answer        (no model call)
-                         no  -> Bedrock (Claude Haiku) -> store -> return
+                         no  -> LLM -> write SQLite -> insert in index -> return
 ```
 
-| Variable | Unset | Set |
-|---|---|---|
-| `CACHE_TABLE_NAME` | in-memory, nothing persists | DynamoDB, plus graph snapshot to disk |
-| `LLM_MODEL_ID` | a miss returns 501 | Bedrock answers, capped per day |
-| `RESET_TOKEN` | reset endpoint disabled | one-command reset to the seeded corpus |
+Every part behind a seam is swappable: `VectorIndex` (linear, hnsw), `Embedder`, `CacheStore`
+(in-memory, SQLite) and `LLM` (OpenAI-compatible HTTP, fake). Each has a small factory.
 
-Deployed on AWS via CloudFormation: EC2, DynamoDB on-demand, least-privilege IAM, an EventBridge
-nightly auto-stop, and a budget action that stops the instance on overspend. Roughly $2-3/month
-at demo usage, since the instance is stopped when idle.
+The embedder decides hit or miss on every request, so the 0.80 threshold belongs to it. The LLM
+only runs on a miss and does not affect the threshold. Changing the embedder means re-deriving
+the threshold with `eval/threshold_sweep.py`.
 
-**A serverless design was built first and then rejected**, which is documented rather than
-buried. Lambda recycles idle containers on its own schedule, so an unpredictable multi-second
-cold start lands on an arbitrary request, and that is the one thing a latency-focused cache
-cannot absorb. Keeping a Lambda warm costs about $21.90/month against $2.30/month for an
-instance that stops when idle.
+An earlier version was deployed to AWS (EC2, DynamoDB, Bedrock). That code is removed; the
+decisions and measurements from that phase are kept in `knowledge/learned.md`, and the code is
+in git history.
 
 ## Running it
 
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-
-cd src && ../.venv/bin/uvicorn api:app --port 8000
-```
-
-Open http://127.0.0.1:8000 for the demo page, or http://127.0.0.1:8000/docs for the API. The
-cache seeds itself with 67 curated support answers on first start, so it can demonstrate a hit
-immediately.
+Needs Python 3.9 or newer. The first run downloads the embedding model (`all-mpnet-base-v2`,
+about 400 MB) once.
 
 ```bash
-.venv/bin/python -m pytest tests/ -q          # 82 tests
-.venv/bin/python scripts/try_queries.py       # labelled behaviour tour
-.venv/bin/python eval/threshold_sweep.py      # regenerate the threshold table
+make setup                          # once: creates .venv and installs dependencies
+ollama pull qwen2.5:7b-instruct     # once: the model that answers new questions
+make run                            # starts http://127.0.0.1:8000
 ```
 
-No AWS account is needed for any of the above. Without `LLM_MODEL_ID` a genuinely new question
-returns 501 rather than a placeholder, which is deliberate: a cache writes down whatever it is
-given and replays it forever, so a fabricated answer would become permanent.
+Open http://127.0.0.1:8000 for the demo page, or http://127.0.0.1:8000/docs for the API. On
+first start the service loads 67 curated support answers into `data/cache.db`, so a cached
+question answers immediately. A question the cache does not know goes to the model, and the
+answer is stored.
+
+**No Ollama?** `make run-fake` starts the same service with a fake model. Cached questions work
+as normal, and a new question gets a placeholder answer. Everything below except real answers
+works with it.
+
+### Try it
+
+With the service running, in a second terminal:
+
+| Command | What it shows |
+|---|---|
+| `make tour` | Labelled queries: which ones hit, which near-misses are refused, and the similarity of each |
+| `make loadtest` | 20 identical questions, 20 different ones, and a flood of 60 slow ones, with the numbers |
+| `make reset` | Restores the cache to the 67 curated entries |
+| `make test` | The 154 tests. No service and no Ollama needed |
+| `.venv/bin/python eval/threshold_sweep.py` | Regenerates the threshold table above |
+
+`make loadtest` starts its own copy of the service on port 8765 with a fake 3-second model, so
+it does not touch the one on port 8000. Run `make help` for the full list.
+
+Or by hand:
+
+```bash
+# a question the cache knows: hit, no model call
+curl -s -X POST localhost:8000/query -H 'Content-Type: application/json' \
+  -d '{"query": "Is it possible to combine my two separate accounts?"}'
+
+# a new question: miss, the model answers, the answer is stored. Ask it again and it hits.
+curl -s -X POST localhost:8000/query -H 'Content-Type: application/json' \
+  -d '{"query": "What is the capital of France?"}'
+
+curl -s localhost:8000/metrics        # counters, model calls, latency percentiles
+```
+
+### Endpoints
+
+| Endpoint | |
+|---|---|
+| `POST /query` | `{"query": "..."}`. Returns `response`, `hit`, `coalesced`, `similarity`, `matched_id`, `latency_ms`. A request that shared an identical in-flight request's model call has `hit: false, coalesced: true`. |
+| `GET /metrics` | Request counts (hits, misses, coalesced, shed, errors), model calls, in-flight gauge, p50/p95/p99 latency, `queue_wait`, miss-path usage |
+| `GET /stats` | The smaller view the demo page uses |
+| `GET /health` | Liveness. Answers even when every worker thread is busy |
+| `POST /admin/reset` | Restores the curated corpus. Needs `X-Reset-Token`; returns 404 unless `RESET_TOKEN` is set. `make run` sets it to `dev-token` |
+| `GET /` | The demo page |
+
+Errors: `503` if the model is unreachable or returned nothing usable, `504` if it timed out
+(nothing is cached in either case, because a cache replays whatever it stores), and `503` with
+`Retry-After: 1` if too many misses are in flight (`MAX_CONCURRENT_MISSES`). Cache hits are
+never refused for that reason. `/metrics` counts the three separately.
+
+### Settings
+
+Environment variables, all optional. Numbers and booleans are parsed strictly: a typo such as
+`MAX_CONCURRENT_MISSES=0` or `SEED_ON_EMPTY=flase` stops the boot with a message instead of
+being guessed at.
+
+| Variable | Default | |
+|---|---|---|
+| `CACHE_DB_PATH` | `data/cache.db` | SQLite file |
+| `LLM_BACKEND` | `openai_compat` | or `fake` (no model) |
+| `LLM_MODEL` | `qwen2.5:7b-instruct` | any model the server has |
+| `LLM_BASE_URL` | `http://localhost:11434/v1` | Ollama; any OpenAI-compatible server works |
+| `LLM_API_KEY` | none | for hosted providers |
+| `LLM_TIMEOUT_SECONDS` | `30` | give up on a model call after this long (504) |
+| `MAX_CONCURRENT_MISSES` | `24` | most requests allowed in the miss path at once; more get a 503 with `Retry-After` |
+| `OPERATING_THRESHOLD` | `0.80` | |
+| `RESET_TOKEN` | unset | enables `POST /admin/reset` |
+| `SEED_ON_EMPTY` | `true` | `false` starts with an empty cache |
+
+Run one server process. The cache lives in that process's memory, so extra `--workers` would
+each build their own index and mint colliding ids against the same SQLite file.
+
+## Under concurrent load
+
+Measured with a fake model that takes 3 seconds (real embedder, index and SQLite), 10-core
+laptop, synthetic traffic. Reproduce with `scripts/loadtest.py`.
+
+| | Before | After |
+|---|---|---|
+| 20 identical new questions at once: model calls | 20 | **1** |
+| 20 different new questions at once: total time | 3.3 s | 3.3 s |
+| A cached question while 60 slow questions run | 3.1 s | **0.11 s** |
+| Those 60 slow questions | all answered, over about 6 s | 24 answered, 36 refused at once (503) |
+| Entries lost or crashes, forced thread switching | 15 of 40 trials | 0 |
+
+The 0.11 s misses my own 100 ms target; the embedder is CPU-bound under a burst. Sharing a
+model call matches identical text, not paraphrases, and the service must run as one process.
+The full account, including what is not fixed, is in
+[`knowledge/concurrency.md`](knowledge/concurrency.md).
 
 ## Layout
 
@@ -121,13 +198,27 @@ given and replays it forever, so a fabricated answer would become permanent.
 | `src/hnsw.py` | The HNSW index, written from scratch |
 | `src/linear_search.py` | Brute force, kept permanently as the ground truth HNSW is graded against |
 | `src/cache_router.py` | The hit/miss decision the whole project builds toward |
-| `src/api.py` | HTTP entry point, the deployed system |
+| `src/sqlite_cache_store.py` | Durable storage; the index is rebuilt from it at startup |
+| `src/llm.py` and backends | The pluggable LLM interface (`openai_compat_llm.py`, `fake_llm.py`) |
+| `src/api.py` | HTTP entry point |
+| `src/single_flight.py` | Lets identical concurrent misses share one model call |
+| `src/limiter.py` | A concurrency cap that refuses instead of waiting, used to keep worker threads free for hits |
+| `src/metrics.py`, `src/metered_llm.py` | Counters and latency percentiles; a wrapper that counts every model call |
+| `scripts/loadtest.py` | Repeatable concurrency scenarios, so each fix can be judged by measurement |
+| `src/static/index.html` | The demo page |
+| `scripts/` | `try_queries.py` (the tour), `loadtest.py`, `reset_cache.py` |
+| `tests/` | 154 tests; none need Ollama or the network |
+| `Makefile` | `make setup`, `run`, `run-fake`, `test`, `tour`, `loadtest`, `reset` |
 | `eval/` | Threshold sweep, recall/latency benchmarks, collision verification |
 | `data/eval_pairs.json` | The 194-pair labeled evaluation set |
-| `infra/` | CloudFormation stack and deployment guide |
 | `knowledge/learned.md` | **28 documented decisions, tradeoffs, and debugging stories** |
+| `knowledge/concurrency.md` | The four concurrency fixes, with before and after numbers |
+| `knowledge/resume.md` | Resume bullets and interview answers, every number traced to a measurement |
 
 ## The reasoning
+
+`knowledge/concurrency.md` covers the concurrency work: four problems, the fix for each, and
+before and after numbers, including the target I missed.
 
 `knowledge/learned.md` is the part I would actually point at. It records why each decision was
 made, what the alternatives were, and where measurements contradicted the hypothesis, including:
@@ -139,8 +230,17 @@ made, what the alternatives were, and where measurements contradicted the hypoth
 - Several bugs that shared one shape, a default that was correct in one phase and silently
   became a defect in the next
 
-## Status
+## History
 
-Complete and running. The miss path calls Bedrock, which is pending an AWS quota grant on a new
-account; until then a miss is refused rather than answered, and everything else (embedding,
-search, threshold, hit/miss, storage, reset) works.
+| Stage | What it did |
+|---|---|
+| 1 | Linear search, the eval harness and the 194-pair set, the 0.80 threshold |
+| 2 | HNSW from scratch, benchmarked against linear search; two real bugs found at scale |
+| 3 | The cache router: embed, search, hit or miss, store |
+| 4 | An AWS deployment (Lambda, then EC2 with DynamoDB and Bedrock), built and measured, later removed |
+| 5 | A local base: SQLite store, pluggable LLM (Ollama by default), no cloud |
+| 6 | The concurrency layer: lock, metrics, single-flight, load shedding |
+
+Stages 1 to 4 are in `knowledge/learned.md`, which is a log of reasoning and so still describes
+the removed AWS code; its status note and section 25 say what changed. Stage 6 is in
+`knowledge/concurrency.md`. The old code is in git history.

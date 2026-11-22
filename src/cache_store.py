@@ -1,27 +1,22 @@
 """
-Cache response storage -- Phase 5.
+Response storage: what answer did we give for this id?
 
-Deliberately separate from the vector index (see vector_index.py's
-docstring and knowledge/learned.md section 1): the index answers "which
-stored vectors are nearest", CacheStore answers "what response did we
-actually give for this id". Keeping them separate means swapping index
-kind (linear <-> hnsw) and swapping storage backend (dict -> DynamoDB,
-Phase 6) are each independent, one-line changes -- neither ever forces
-touching the other.
+Separate from the vector index on purpose. The index answers "which stored
+vectors are nearest"; the store answers "what response belongs to this id".
+CacheRouter is the piece that keeps the two in sync: every id in the index
+should have an entry here.
 
-Contract: an id used here should always correspond 1:1 with an id
-inserted into whatever VectorIndex is paired with this store. CacheStore
-itself knows nothing about vectors or similarity; CacheRouter (the piece
-that actually pairs an index with a store) is what keeps them in sync.
+Implementations: InMemoryCacheStore (below, for tests) and
+SqliteCacheStore (sqlite_cache_store.py, durable).
 """
 
 from abc import ABC, abstractmethod
-from typing import Hashable, Optional, Sequence
+from typing import Hashable, Iterator, Optional, Sequence, Tuple
+
+import numpy as np
 
 
 class CacheStore(ABC):
-    """Maps an id to the response stored under it. Nothing more."""
-
     @abstractmethod
     def put(
         self,
@@ -30,40 +25,21 @@ class CacheStore(ABC):
         vector: Optional[Sequence[float]] = None,
         source: Optional[str] = None,
     ) -> None:
-        """
-        Store response under id, overwriting any existing entry.
+        """Store response under id, overwriting any existing entry.
 
-        `source` records where the answer came from: "seed" for the curated
-        starter corpus, "llm" for something a model actually produced.
-        Optional because an in-memory store used in tests has no need for
-        provenance.
-
-        It exists because without it the two are indistinguishable -- both
-        are just a string in `response` -- and that matters in both
-        directions. A curated seed answer that reads plausibly is *more*
-        dangerous unlabelled than an obvious placeholder, since nothing
-        surfaces that it was never generated. And a purge that cannot tell
-        them apart has to delete everything, including answers that were
-        paid for.
-
-        `vector` is the query embedding that produced this entry. It's
-        optional because an in-memory store has no use for it: the index
-        it's paired with holds the same vector in memory already, and both
-        die together when the process does.
-
-        It exists because a persistent store outlives the index it was
-        paired with. Lambda containers are stateless between invocations,
-        so a deployed router rebuilds its HNSW graph on every cold start
-        (knowledge/learned.md section 19) -- and it can only do that if the
-        vectors were persisted alongside the responses. Passing it through
-        `put` keeps one write path for both halves of an entry rather than
-        having the Lambda handler write vectors to storage behind the
-        router's back.
+        `vector` is the query embedding. It is stored so the index can be
+        rebuilt from the store after a restart. `source` records where the
+        answer came from ("seed" for the curated corpus, "llm" for a model).
         """
 
     @abstractmethod
     def get(self, id: Hashable) -> Optional[str]:
-        """Return the stored response for id, or None if not present."""
+        """Return the stored response for id, or None. Never touches disk."""
+
+    @abstractmethod
+    def all_items(self) -> Iterator[Tuple[Hashable, np.ndarray, str]]:
+        """Yield (id, vector, response) for every entry that has a vector,
+        oldest first. Used to rebuild the index at startup."""
 
     @abstractmethod
     def __len__(self) -> int:
@@ -71,45 +47,32 @@ class CacheStore(ABC):
 
     @abstractmethod
     def clear(self) -> int:
-        """Remove every cache entry, returning how many were removed.
-
-        A first-class operation rather than something a caller does behind
-        the store's back, because resetting to a known state is a normal
-        thing to need from a cache: demos accumulate entries, and getting
-        back to a clean baseline should not require knowing which storage
-        backend is underneath.
-
-        Implementations must NOT remove reserved rows -- anything whose id
-        starts with "__". Those hold operational state that shares the
-        table, currently the daily LLM-call counter (usage_limiter.py).
-        Clearing the cache is routine; silently resetting a spend guard as
-        a side effect of it is not.
-        """
+        """Remove every entry, returning how many were removed."""
 
 
 class InMemoryCacheStore(CacheStore):
-    """Plain dict-backed store. Phase 5's default; DynamoDBCacheStore
-    (Phase 6) implements the same contract against real persistence."""
+    """Dict-backed store. Nothing survives the process."""
 
     def __init__(self):
-        self._data = {}
+        self._data = {}  # id -> (response, vector)
 
     def put(self, id, response, vector=None, source=None):
-        # vector and source deliberately ignored -- see the contract's
-        # docstring. This store never outlives the in-memory index holding
-        # the same vector, and nothing queries provenance in memory.
-        self._data[id] = response
+        vec = None if vector is None else np.asarray(vector, dtype=np.float32)
+        self._data[id] = (response, vec)
 
     def get(self, id):
-        return self._data.get(id)
+        entry = self._data.get(id)
+        return None if entry is None else entry[0]
+
+    def all_items(self):
+        for id, (response, vec) in list(self._data.items()):
+            if vec is not None:
+                yield id, vec, response
 
     def __len__(self):
         return len(self._data)
 
     def clear(self):
-        # Nothing reserved is ever written here: the usage counter only
-        # exists in the durable store, since an in-memory one would reset
-        # on restart and be no guard at all.
         removed = len(self._data)
         self._data.clear()
         return removed

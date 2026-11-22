@@ -1,29 +1,25 @@
 """
-HTTP entry point -- the deployed system.
+HTTP entry point.
 
-Replaces the Lambda handler this phase started with. The reason is
-measured, not stylistic: Lambda recycles idle containers on its own
-schedule, and this system's cold start is unusually expensive (load an
-embedding model, then rebuild an HNSW graph held in RAM). That meant an
-unpredictable multi-second stall on an arbitrary request, which is exactly
-wrong for a cache whose entire pitch is latency. Keeping a Lambda warm
-costs more than the small instance this now runs on. Full reasoning in
-knowledge/learned.md section 23.
-
-What changes as a result: this is a long-lived process, so the router is
-built once at startup and simply stays there. The "rebuild on every cold
-start" logic becomes ordinary startup work, paid once per boot on your
-schedule rather than repeatedly on AWS's.
-
-Startup order is a deliberate fallback chain:
-  1. Load the graph from a local snapshot on the instance's disk (fast).
-  2. If there isn't a usable one, rebuild it from DynamoDB (slower, but
-     always correct -- DynamoDB is the source of truth, the snapshot is
-     only ever an optimization).
-Shutdown writes a fresh snapshot so the next boot takes path 1.
+A long-lived process: the router (embedder, index, store, LLM) is built once
+at startup and stays in memory. Entries persist in a SQLite file, and the
+HNSW index is rebuilt from it at startup.
 
 Run it:
-    uvicorn api:app --host 0.0.0.0 --port 8000
+    cd src && ../.venv/bin/python -m uvicorn api:app --port 8000
+
+Configuration (environment variables, all optional):
+    CACHE_DB_PATH        SQLite file            default data/cache.db
+    LLM_BACKEND          openai_compat | fake   default openai_compat
+    LLM_MODEL            model name             default qwen2.5:7b-instruct
+    LLM_BASE_URL         API base URL           default http://localhost:11434/v1 (Ollama)
+    LLM_API_KEY          bearer token, if the server wants one
+    LLM_TIMEOUT_SECONDS  give up on a model call after this long   default 30
+    MAX_CONCURRENT_MISSES  most requests allowed in the miss path at once;
+                         more are refused with 503 + Retry-After   default 24
+    OPERATING_THRESHOLD  similarity threshold   default 0.80
+    RESET_TOKEN          enables POST /admin/reset (404 if unset)
+    SEED_ON_EMPTY        false to start with an empty cache   default true
 """
 
 import json
@@ -31,26 +27,105 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from cache_router import (
-    CacheRouter,
-    EmptyLLMResponse,
-    LLMNotConfigured,
-    OPERATING_THRESHOLD,
-)
+import metrics as m
+from cache_router import CacheRouter, EmptyLLMResponse, OPERATING_THRESHOLD
+from limiter import Overloaded
+from llm import LLMError, LLMTimeout
+from llm_factory import create_llm
 from local_embedder import SentenceTransformerEmbedder
-from usage_limiter import DailyLimitReached, UsageLimiter
+from metered_llm import MeteredLLM
+from metrics import Metrics
+from sqlite_cache_store import SqliteCacheStore
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def parse_bool(raw, name):
+    """Strict boolean parse for an env var. Anything outside the known
+    spellings is an error, so a typo stops the boot instead of silently
+    meaning the opposite of what was intended."""
+    value = raw.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{name}={raw!r} is not a boolean; use one of "
+        "true/false, 1/0, yes/no, on/off"
+    )
+
+
+def parse_positive_int(raw, name):
+    """Strict whole-number parse, at least 1. A cap of 0 would refuse every
+    request, and "2.5" or "many" is a typo worth stopping the boot over."""
+    text = raw.strip()
+    if text.isdigit() and int(text) >= 1:
+        return int(text)
+    raise ValueError(f"{name}={raw!r} is not a whole number of at least 1")
+
+
+def parse_positive_float(raw, name):
+    """Strict positive-number parse. Rejects zero, negatives, nan and inf:
+    a timeout of nan or inf silently means "never time out"."""
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        value = None
+    if value is None or not (0 < value < float("inf")):
+        raise ValueError(f"{name}={raw!r} is not a positive number")
+    return value
+
+
+def env_positive_int(name, default):
+    raw = os.environ.get(name)
+    return default if raw is None else parse_positive_int(raw, name)
+
+
+def env_positive_float(name, default):
+    raw = os.environ.get(name)
+    return default if raw is None else parse_positive_float(raw, name)
+
+
+def env_bool(name, default):
+    """Read a boolean env var, falling back to `default` when unset."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return parse_bool(raw, name)
+
 
 # Configuration is read here, at the entry point, rather than inside the
 # components, so the components stay usable from the eval harness and
 # local scripts with no environment set up.
-CACHE_TABLE_NAME = os.environ.get("CACHE_TABLE_NAME")
-SNAPSHOT_PATH = os.environ.get("SNAPSHOT_PATH", "/var/lib/semantic-cache/graph.pkl")
 THRESHOLD = float(os.environ.get("OPERATING_THRESHOLD", OPERATING_THRESHOLD))
-LLM_MODEL_ID = os.environ.get("LLM_MODEL_ID")
+CACHE_DB_PATH = os.environ.get(
+    "CACHE_DB_PATH",
+    os.path.join(os.path.dirname(__file__), "..", "data", "cache.db"),
+)
+LLM_BACKEND = os.environ.get("LLM_BACKEND", "openai_compat")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:7b-instruct")
+LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:11434/v1")
+LLM_API_KEY = os.environ.get("LLM_API_KEY")
+
+# How long to wait on the model before giving up (504). This is the socket
+# timeout of the HTTP call, so it bounds each wait for the server's reply, not
+# a hard wall-clock deadline; for a non-streaming reply the two are the same
+# in practice. The backend's own default is 60 s, long enough for one stuck
+# model call to hold a worker thread for a full minute.
+LLM_TIMEOUT_SECONDS = env_positive_float("LLM_TIMEOUT_SECONDS", 30.0)
+
+# The most requests allowed in the miss path at once, counting both those
+# calling the model and those waiting on a shared call. Each holds one of the
+# server's worker threads (40 by default, shared by every endpoint), so this
+# is what keeps threads free for cache hits: with 24, at least 16 are always
+# available to them. Past the cap a miss is refused at once with a 503.
+MAX_CONCURRENT_MISSES = env_positive_int("MAX_CONCURRENT_MISSES", 24)
+RETRY_AFTER_SECONDS = 1
 
 # Enables POST /admin/reset. Unset means the endpoint does not exist at
 # all, which is the right default for an API reachable from anywhere:
@@ -60,18 +135,18 @@ RESET_TOKEN = os.environ.get("RESET_TOKEN")
 
 # Populate the curated starter corpus when the cache comes up empty, so a
 # fresh deployment can demonstrate a hit immediately instead of having to
-# be warmed by hand. Set to 0 to bring it up genuinely cold.
-SEED_ON_EMPTY = os.environ.get("SEED_ON_EMPTY", "1") != "0"
+# be warmed by hand. Set SEED_ON_EMPTY=false to bring it up genuinely cold.
+SEED_ON_EMPTY = env_bool("SEED_ON_EMPTY", default=True)
 SEED_ANSWERS_PATH = os.environ.get(
     "SEED_ANSWERS_PATH",
     os.path.join(os.path.dirname(__file__), "..", "data", "seed_answers.json"),
 )
 
 # Set at startup. Module-level because a single long-lived process is the
-# whole point: this survives every request, unlike a Lambda container.
+# whole point: this survives every request.
 state = {
-    "router": None, "hits": 0, "misses": 0,
-    "started_at": None, "boot_seconds": None, "limiter": None,
+    "router": None, "metrics": None,
+    "started_at": None, "boot_seconds": None,
 }
 
 
@@ -79,95 +154,40 @@ class QueryRequest(BaseModel):
     # Bounded on purpose. Every query that misses becomes a permanent cache
     # entry, so an empty or enormous one is not just a bad request, it is
     # persistent pollution. 2000 characters is far past any real support
-    # question and well inside DynamoDB's 400KB item limit alongside a
-    # 768-float vector.
+    # question.
     query: str = Field(..., min_length=1, max_length=2000)
 
 
-def _build_store():
-    """DynamoDB when a table is configured, in-memory otherwise so the app
-    can be run locally with no AWS account at all."""
-    if not CACHE_TABLE_NAME:
-        from cache_store import InMemoryCacheStore
-        return InMemoryCacheStore(), False
-    from dynamodb_cache_store import DynamoDBCacheStore
-    return DynamoDBCacheStore(CACHE_TABLE_NAME), True
-
-
-def _refuse(query: str) -> str:
-    """Stands in for the model when none is configured.
-
-    Refuses rather than returning placeholder text. Returning a stub here
-    is what made a miss cache "[stub response for: ...]" and then serve it
-    back as a confident HIT on the next identical question, filling the
-    cache with answers that were never answered.
-
-    The cache is still fully demonstrable without a model: the seeded
-    corpus serves real hits, and near-misses are still correctly refused.
-    The only thing that stops working is answering something genuinely new,
-    which is exactly the operation that needs a model.
-    """
-    raise LLMNotConfigured(
-        "no model is configured, so this question cannot be answered or cached; "
-        "questions already in the cache still work"
-    )
-
-
 def _build_llm():
-    """The real Bedrock call when configured, otherwise a callable that
-    refuses. Never a placeholder."""
-    if not LLM_MODEL_ID:
-        return _refuse
-    from bedrock_llm import BedrockLLM
-    return BedrockLLM(model=LLM_MODEL_ID)
-
-
-def build_router():
-    """Construct the router and populate its index, preferring the local
-    snapshot and falling back to the durable store."""
-    embedder = SentenceTransformerEmbedder()
-    store, durable = _build_store()
-    llm = _build_llm()
-
-    # Only cap a real model. Wrapping the refusing placeholder would count
-    # calls that never happen and burn the day's allowance on requests that
-    # cost nothing.
-    if durable and LLM_MODEL_ID:
-        limiter = UsageLimiter(store.table)
-        state["limiter"] = limiter
-        llm = limiter.wrap(llm)
-
-    router = CacheRouter(
-        "hnsw", embedder=embedder, llm=llm, cache_store=store, threshold=THRESHOLD
+    if LLM_BACKEND == "fake":
+        return create_llm("fake")
+    return create_llm(
+        LLM_BACKEND, model=LLM_MODEL, base_url=LLM_BASE_URL, api_key=LLM_API_KEY,
+        timeout=LLM_TIMEOUT_SECONDS,
     )
 
-    # The snapshot only holds the index. Responses live in the store, so
-    # restoring one without the other leaves ids in the graph that have no
-    # answer behind them. With a durable store both come back together;
-    # with the in-memory store the responses are gone, so loading a
-    # snapshot would guarantee that mismatch. CacheRouter.route() recovers
-    # from it either way, but there's no reason to manufacture it.
-    if durable and router.load_snapshot(SNAPSHOT_PATH):
-        source = "snapshot"
-    elif durable:
-        router.restore(
-            (entry_id, vector) for entry_id, vector, _ in store.all_items()
-        )
-        source = "dynamodb"
-    else:
-        source = "empty (no CACHE_TABLE_NAME, nothing persists)"
 
-    # A cache that starts empty misses on its first query by definition, so
-    # the behaviour worth demonstrating never happens on a fresh deployment.
-    # Only seeds when the index is genuinely empty, so this runs once on a
-    # new table and never touches a warm one.
+def build_router(store=None, embedder=None, metrics=None):
+    """Construct the router: open the store, rebuild the index from it, and
+    seed the curated corpus if the cache is empty. When `metrics` is given,
+    every model call is counted."""
+    embedder = embedder or SentenceTransformerEmbedder()
+    if store is None:
+        store = SqliteCacheStore(CACHE_DB_PATH, embedder_id=embedder.model_name)
+
+    llm = _build_llm()
+    if metrics is not None:
+        llm = MeteredLLM(llm, metrics)
+    router = CacheRouter(
+        "hnsw", embedder=embedder, llm=llm, cache_store=store, threshold=THRESHOLD,
+        max_concurrent_misses=MAX_CONCURRENT_MISSES,
+    )
+    restored = router.restore((id, vector) for id, vector, _ in store.all_items())
+
+    seeded = 0
     if SEED_ON_EMPTY and len(router.index) == 0:
-        pairs = load_seed_answers()
-        if pairs:
-            added = router.seed(pairs)
-            source = f"{source} + seeded {added}"
-
-    return router, source
+        seeded = router.seed(load_seed_answers())
+    return router, f"restored {restored}, seeded {seeded}"
 
 
 def load_seed_answers(path=SEED_ANSWERS_PATH):
@@ -186,29 +206,22 @@ def load_seed_answers(path=SEED_ANSWERS_PATH):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     started = time.time()
-    router, source = build_router()
+    # A fresh Metrics per startup: the numbers describe the current run
+    # alongside uptime_seconds. Only observable when the app starts twice
+    # in one process (tests do; a deployed service gets a fresh module).
+    state["metrics"] = Metrics()
+    router, source = build_router(metrics=state["metrics"])
     state["router"] = router
     state["started_at"] = time.time()
     state["boot_seconds"] = round(time.time() - started, 2)
-    # These describe the current run alongside uptime_seconds, so startup
-    # zeroes them. Only observable when the app starts twice in one
-    # process (tests do; a deployed service gets a fresh module each time).
-    state["hits"] = state["misses"] = 0
     print(
         f"ready in {state['boot_seconds']}s  "
-        f"restored_from={source}  entries={len(router.index)}  threshold={THRESHOLD}"
+        f"{source}  entries={len(router.index)}  threshold={THRESHOLD}"
     )
 
     yield
 
-    # Best effort: a failed snapshot costs the next boot some time, it
-    # never costs correctness, since DynamoDB still holds everything.
-    try:
-        os.makedirs(os.path.dirname(SNAPSHOT_PATH), exist_ok=True)
-        router.save_snapshot(SNAPSHOT_PATH)
-        print(f"snapshot written to {SNAPSHOT_PATH} ({len(router.index)} entries)")
-    except OSError as exc:
-        print(f"snapshot failed, next boot will rebuild from the store: {exc}")
+    state["router"].cache_store.close()
 
 
 app = FastAPI(title="Semantic Cache", lifespan=lifespan)
@@ -216,17 +229,7 @@ app = FastAPI(title="Semantic Cache", lifespan=lifespan)
 
 @app.get("/", include_in_schema=False)
 def index():
-    """The demo page, served by the same process as the API.
-
-    Deliberately not S3 + CloudFront. The page is useless without this
-    backend, so splitting them across two origins buys CORS configuration
-    and a page that loads but errors whenever the instance is stopped,
-    which is most of the time by design. It also adds a service that
-    demonstrates nothing the rest of the stack does not already cover.
-    Same reasoning that ruled out OpenSearch Serverless and Lambda
-    (knowledge/learned.md sections 16, 19, 23): a service has to earn its
-    place.
-    """
+    """The demo page, served by the same process as the API."""
     return FileResponse(os.path.join(os.path.dirname(__file__), "static", "index.html"))
 
 
@@ -234,118 +237,117 @@ def index():
 def reset(x_reset_token: str = Header(default=None)):
     """Restore the cache to exactly the curated corpus.
 
-    Lives inside the service because the in-memory index is the thing that
-    actually needs clearing, and only this process holds it. Purging the
-    durable store from outside leaves the running index untouched, so the
-    cache keeps serving entries that no longer exist in storage.
-
-    Three steps, and the order matters:
-      1. Clear the store (reserved rows, like the usage counter, survive).
-      2. Delete the snapshot. Skipping this is the subtle failure: the
-         reset looks like it worked, then the next restart reloads the old
-         graph from disk and silently undoes all of it.
-      3. Rebuild the router and re-seed from the canonical corpus.
-
-    Disabled entirely unless RESET_TOKEN is set. This API is deliberately
-    reachable from anywhere, and an unauthenticated endpoint that wipes the
-    cache is not something to leave on by accident, so the default is off
-    rather than open.
+    Disabled entirely (404) unless RESET_TOKEN is set, so forgetting to
+    configure it fails closed rather than leaving an open cache-wipe
+    endpoint.
     """
     if not RESET_TOKEN:
-        # 404 rather than 403: an endpoint that isn't enabled shouldn't
-        # advertise that it exists.
         raise HTTPException(status_code=404, detail="Not Found")
     if x_reset_token != RESET_TOKEN:
         raise HTTPException(status_code=401, detail="bad or missing X-Reset-Token")
 
-    removed = state["router"].cache_store.clear()
-
-    snapshot_removed = False
-    try:
-        os.remove(SNAPSHOT_PATH)
-        snapshot_removed = True
-    except OSError:
-        pass  # absent is the desired end state either way
-
-    router, source = build_router()
+    store = state["router"].cache_store
+    removed = store.clear()
+    router, source = build_router(store, state["router"].embedder, state["metrics"])
     state["router"] = router
-    state["hits"] = state["misses"] = 0
+    state["metrics"].reset()
 
     print(f"reset: removed {removed}, restored {len(router.index)} ({source})")
-    return {
-        "removed": removed,
-        "restored": len(router.index),
-        "snapshot_deleted": snapshot_removed,
-        "source": source,
-    }
+    return {"removed": removed, "restored": len(router.index), "source": source}
 
 
-@app.post("/query")
-def query(request: QueryRequest):
+async def _stamp_arrival(request: Request):
+    """Record when the request arrived. Async on purpose: it runs on the
+    event loop immediately, before the sync handler is queued for a worker
+    thread, so (handler start - arrival) is exactly the time spent waiting
+    for a free thread."""
+    request.state.arrived = time.perf_counter()
+
+
+@app.post("/query", dependencies=[Depends(_stamp_arrival)])
+def query(request: QueryRequest, http_request: Request):
     router = state["router"]
-    started = time.time()
+    metrics = state["metrics"]
+    arrived = http_request.state.arrived
 
+    metrics.observe("queue_wait", (time.perf_counter() - arrived) * 1000)
+    metrics.incr(m.REQUESTS)
+
+    outcome = "error"
     try:
-        result = router.route(request.query)
-    except DailyLimitReached as exc:
-        # 429, not 503: this is a deliberate policy decision, not a
-        # malfunction, and the caller should know the difference. Cache
-        # hits keep working while this is in effect, since they never
-        # touch the LLM.
-        raise HTTPException(status_code=429, detail=str(exc))
-    except LLMNotConfigured as exc:
-        # 501, not 503: the service is healthy and cached questions still
-        # work. What is missing is a capability, not availability.
-        raise HTTPException(status_code=501, detail=str(exc))
-    except EmptyLLMResponse as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-    except Exception as exc:
-        # Anything else from the miss path is upstream: throttling, auth,
-        # a network failure. Return a useful message rather than a stack
-        # trace, and log the real error where it can be found.
-        #
-        # Nothing was cached in any of these branches, which is the point.
-        # route() writes only after the LLM returns something usable, so a
-        # failure leaves the cache exactly as it was.
-        print(f"route failed: {type(exc).__name__}: {exc}")
+        with metrics.in_flight():
+            result = router.route(request.query)
+        outcome = "hit" if result.hit else "coalesced" if result.coalesced else "miss"
+    except Overloaded as exc:
+        outcome = "shed"
+        metrics.incr(m.SHED)
         raise HTTPException(
             status_code=503,
-            detail=f"upstream model call failed ({type(exc).__name__}); nothing was cached",
+            detail=f"overloaded ({exc}); nothing was attempted, retry shortly",
+            headers={"Retry-After": str(RETRY_AFTER_SECONDS)},
         )
+    except LLMTimeout as exc:
+        metrics.incr(m.ERRORS_504)
+        raise HTTPException(status_code=504, detail=f"{exc}; nothing was cached")
+    except (LLMError, EmptyLLMResponse) as exc:
+        metrics.incr(m.ERRORS_503)
+        raise HTTPException(status_code=503, detail=f"{exc}; nothing was cached")
+    except Exception:
+        metrics.incr(m.ERRORS_500)
+        raise
+    finally:
+        # Measured from arrival, so it includes any wait for a worker
+        # thread: this is the latency a client actually experiences.
+        latency_ms = (time.perf_counter() - arrived) * 1000
+        metrics.observe(outcome, latency_ms)
 
-    latency_ms = (time.time() - started) * 1000
-
-    state["hits" if result.hit else "misses"] += 1
+    metrics.incr({"hit": m.HITS, "coalesced": m.COALESCED, "miss": m.MISSES}[outcome])
 
     return {
         "response": result.response,
         "hit": result.hit,
+        "coalesced": result.coalesced,
         "similarity": result.similarity,
         "matched_id": result.matched_id,
         "latency_ms": round(latency_ms, 2),
     }
 
 
+# async on purpose: these run on the event loop, not in the worker-thread
+# pool, so they still answer when every worker thread is busy with a slow
+# model call. A health check that queues behind the overload it is
+# supposed to report is no use.
 @app.get("/health")
-def health():
+async def health():
     return {"ok": state["router"] is not None}
+
+
+@app.get("/metrics")
+async def metrics_endpoint():
+    """Counters, in-flight gauge and recent latency percentiles as JSON."""
+    snapshot = state["metrics"].snapshot()
+    router = state["router"]
+    snapshot["entries"] = len(router.index)
+    in_use, limit = router.miss_path()
+    snapshot["miss_path"] = {"in_use": in_use, "limit": limit}
+    return snapshot
 
 
 @app.get("/stats")
 def stats():
-    """What the cache is actually doing, for the demo. Every hit is a
-    Bedrock call that provably did not happen, which is the project's
-    cost-savings claim made countable rather than estimated."""
-    hits, misses = state["hits"], state["misses"]
-    total = hits + misses
-    limiter = state["limiter"]
+    """What the cache is actually doing, for the demo. Every hit is an
+    LLM call that provably did not happen, which is the project's
+    cost-savings claim made countable rather than estimated. The fuller
+    operational picture is at /metrics."""
+    metrics = state["metrics"]
+    hits, misses, coalesced = metrics.get(m.HITS), metrics.get(m.MISSES), metrics.get(m.COALESCED)
+    total = hits + misses + coalesced
     return {
-        "llm_calls_remaining_today": limiter.remaining() if limiter else None,
-        "daily_llm_limit": limiter.limit if limiter else None,
         "entries": len(state["router"].index),
         "requests": total,
         "hits": hits,
         "misses": misses,
+        "coalesced": coalesced,
         "hit_rate": round(hits / total, 4) if total else None,
         "threshold": THRESHOLD,
         "boot_seconds": state["boot_seconds"],

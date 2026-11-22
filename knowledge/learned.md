@@ -2,6 +2,12 @@
 
 Running log of the non-obvious decisions, tradeoffs, and debugging lessons from building this project. Organized by topic, not chronology. The point of this file is "what would I actually say if someone asked me to defend a decision or walk through a bug," not a feature log.
 
+**Status of this log.** It is a record of reasoning, written as the project went, so some
+sections describe code that no longer exists. Sections 16, 19, 20 and 23 to 23e cover an AWS
+deployment (Lambda, then one EC2 instance, with DynamoDB and Bedrock). That code was removed;
+section 25 says why. The lessons in those sections still stand. The concurrency work is written
+up separately in `concurrency.md`.
+
 ---
 
 ## 1. Architecture: the hot-swap seam (strategy pattern)
@@ -584,3 +590,37 @@ The first row is exactly what section 18 recorded. The demo had been passing on 
 **Talking point:** "My end-to-end verification was passing on the wrong model for two phases. I found it because fixing an unrelated default made a documented number move, and I chased the moved number instead of assuming I'd broken something. The corrected result actually agrees with my own eval table, which is what convinced me the new number was right and the old one had never been."
 
 ---
+
+---
+
+## 25. Replacing the cloud deployment with a local base
+
+**What changed.** The AWS deployment was deleted: the CloudFormation stack, the DynamoDB store,
+the Bedrock LLM and embedder, the usage limiter, and the systemd service file. It is in git history
+(last present at commit `580db6d`), and sections 16, 19, 20 and 23 to 23e still explain it.
+
+**Why.** The next work was concurrency: races, duplicate model calls, slow requests starving fast
+ones. None of that can be fixed without measuring it, and measuring needs a setup that is
+repeatable, free and fast to restart. The cloud version was none of those, and its model quota
+was still zero. The cache logic was identical either way, so nothing was lost by running it
+locally. Cloud deployment is deferred, not abandoned: every part behind a seam can be swapped
+back.
+
+**What replaced it.**
+- **SQLite store.** One file is the source of truth. Cache hits never read it: responses are
+  mirrored in memory, so the database is write-through. It records which embedding model built
+  it and refuses to open under a different one, because vectors from another model mean nothing.
+- **No graph snapshot.** The index is rebuilt from the database at startup instead of loaded
+  from a pickle file. Rebuilding 10,000 entries takes about 16 seconds, which is fine locally, and
+  it removes a second copy of the data that could drift from the first.
+- **A pluggable LLM.** One small interface. One backend speaks the OpenAI-compatible API, which
+  covers Ollama (the default), LM Studio, vLLM and OpenAI. A fake model with a configurable delay
+  and failure exists for tests and load tests. A timeout is a different error from other
+  failures, and an answer cut off at the token limit is refused rather than cached.
+- **Failing loudly.** A store entry without a vector is refused, and an index and store that
+  disagree raise an error instead of being quietly repaired. Both follow section 23d: in a cache,
+  a silent fix hides the bug and the bad data is replayed.
+
+**Talking point.** "I deleted a working cloud deployment because it was slowing down the work that
+mattered. It cost nothing to reverse, since it is in git history, and the stage after it
+produced numbers anyone can reproduce with one command."

@@ -1,7 +1,8 @@
 # Semantic Cache: resume and interview reference
 
 Everything here is copy-paste ready and every number is traceable to a measurement in
-`knowledge/learned.md`. Nothing depends on Bedrock, so all of it is accurate today.
+`knowledge/learned.md` (the index and threshold) or `knowledge/concurrency.md` (the load
+numbers). The repo no longer contains the AWS deployment, so nothing below claims one.
 
 **Rule for using these:** always attach the scale to a recall number. "99.5% recall@1"
 unqualified is a claim an interviewer can puncture in one question; "99.5% recall@1 at 1,000
@@ -11,25 +12,29 @@ vectors" is the same number, fully defensible, and closes the question before it
 
 ## Resume bullets (primary, 5 lines)
 
-**Semantic Caching Layer for LLM APIs** — Python, AWS (EC2, DynamoDB, Bedrock, CloudFormation)
+**Semantic Caching Layer for LLM APIs** — Python, FastAPI, SQLite
 
 - Built an HNSW approximate-nearest-neighbor index from scratch, no vector library, reaching **99.5% recall@1 at 1,000 vectors** and **1.5x faster queries than brute force at 10,000**
 - Derived the cache's similarity threshold from a **194-pair labeled evaluation set** using an explicit asymmetric cost model, holding false-positive matches to **7%** while keeping hit rate high enough to be useful
 - Diagnosed two algorithmic bugs that small-scale tests could not surface: an **O(n²) insert (443s to 0.37s at n=50,000)** and unrecoverable upper-layer graph routing (**recall 54% to 65.5%**), each confirmed by measurement before and after the fix
 - Benchmarked four embedding models on the target task and found a theoretically stronger model performed worse in practice; reported the measured result over the hypothesis
-- Deployed via CloudFormation with least-privilege IAM, scheduled auto-stop, and budget-triggered shutdown; **rejected a serverless design after measuring cold-start cost** ($21.90/mo to keep Lambda warm vs $2.30/mo for a stop/start instance)
+- Found and fixed four concurrency problems in the service, each measured before and after: identical concurrent misses went from **20 model calls to 1**; cached lookups during a burst of 60 slow misses went from **3.1 s to 0.11 s** by capping the miss path and refusing overflow with a 503; races that lost entries in **15 of 40** forced-interleaving trials now lose none; added `/metrics` and a one-command load test
 
 ## Resume bullets (tight, 3 lines)
 
 - Built an HNSW vector index from scratch, no library, **99.5% recall@1** and **1.5x faster than brute force at 10k vectors**; found and fixed an **O(n²) insert (443s to 0.37s)** and a graph-routing bug worth 11 points of recall
 - Chose the cache's similarity threshold from a **194-pair evaluation set** with an explicit asymmetric cost model, holding wrong-answer rate to **7%**, and can name the exact scale where brute force still beats the custom index
-- Deployed on AWS with CloudFormation, least-privilege IAM, and layered spend controls; **rejected a Lambda architecture on measured cost** after building it
+- Made the service safe under concurrent load, measured before and after: **20 identical requests now cost 1 model call**, and cached lookups during a burst of slow misses went from **3.1 s to 0.11 s**
 
 ## One-line version
 
 Built a semantic cache for LLM APIs around a from-scratch HNSW index (99.5% recall@1 at 1k
-vectors), with the similarity threshold derived from a 194-pair labeled eval, deployed on AWS
-via CloudFormation.
+vectors), with the similarity threshold derived from a 194-pair labeled eval and a concurrency
+layer measured under load (identical misses share one model call; overflow is refused, not queued).
+
+*History, if asked:* an earlier version ran on AWS (EC2, DynamoDB, Bedrock). It was removed from
+the repo to build and measure the concurrency work locally (`learned.md` §25). Describe it as
+past work, not as what the repo contains.
 
 ---
 
@@ -63,8 +68,19 @@ Chose 0.80 and explicitly *not* 0.85: at 0.85 the hit rate collapses to 4%, whic
 task, even though BGE is trained with hard-negative mining aimed at exactly this near-miss
 problem. The hypothesis was wrong and the measurement stood.
 
-**Scale:** ~2,000 lines of source, ~1,100 lines of tests, 82 tests passing, 28 documented
-decisions in `learned.md`.
+**Concurrency** (3-second fake model, real embedder and index, one laptop, `knowledge/concurrency.md`):
+
+| | Before | After |
+|---|---|---|
+| 20 identical new questions: model calls | 20 | **1** |
+| Cached question during 60 slow questions | 3.1 s | **0.11 s** |
+| Forced-interleaving trials that lost entries | 15 of 40 | 0 |
+
+The 0.11 s missed my own 100 ms target. The embedder is CPU-bound (16 ms alone, 455 ms each with
+40 at once), which the miss-path cap cannot fix.
+
+**Scale:** ~1,800 lines of source, ~1,950 lines of tests, 154 tests passing, 28 numbered
+decisions in `learned.md` plus `concurrency.md`.
 
 ---
 
@@ -96,10 +112,18 @@ that the cache was left byte-for-byte unchanged.
 **5. "I built the serverless version, measured it, and threw it away."**
 Lambda recycles idle containers on its own schedule, so an unpredictable multi-second cold
 start lands on an arbitrary request, which is the one thing a latency-focused cache cannot
-absorb. Keeping a Lambda warm costs more than simply running a small instance. I had already
-rejected provisioned concurrency on cost without pricing the alternative it was losing to.
+absorb. Keeping a Lambda warm cost $21.90 a month against $2.30 for a stop/start instance. I
+had already rejected provisioned concurrency on cost without pricing the alternative it was
+losing to. (This is past work: that code is no longer in the repo. `learned.md` §23.)
 
-**6. "Most of my bugs were silent, and they rhymed."**
+**6. "I missed my own target, and I can tell you why."**
+After capping the miss path, cached lookups during a burst of slow misses dropped from 3.1 s to
+0.11 s. My target was under 0.1 s. I measured the cause instead of guessing: the embedder takes
+16 ms alone but 455 ms each when 40 run at once, so the remaining bottleneck is CPU, and capping
+the miss path cannot touch it. Naming the miss and the measured cause is stronger than a
+round number.
+
+**7. "Most of my bugs were silent, and they rhymed."**
 A default that is correct in one phase becomes a defect in the next, with nothing announcing
 the transition: an embedding model default that outlived the threshold it matched, an `or` that
 discarded an empty-but-valid cache store, a stub LLM whose placeholder got cached and served
@@ -125,6 +149,19 @@ Every hit is an API call that provably did not happen, and the service counts th
 the threshold tradeoff precisely from the eval; what I have not yet done is run realistic
 traffic end-to-end to produce a single measured savings figure. That is the next thing I would
 build. *(Honest gap. Better to name it than to be caught.)*
+
+**"Why not just put a lock around the model call?"**
+It would stop duplicate calls, but every miss would wait for every other miss: twenty different
+3-second questions would take 60 seconds instead of 3, and cached lookups would queue behind
+them. The rule I used: never hold a lock while waiting on something slow. Single-flight keeps
+one waiting room per question, so identical questions share one call and different questions
+never wait for each other.
+
+**"What happens when the model is slow or down?"**
+A model failure returns 503 or 504 and nothing is cached. When too many misses are in flight,
+the extra ones get an immediate 503 with `Retry-After` instead of queueing, because a queued
+request still holds one of the server's 40 worker threads, which is exactly what cached lookups
+need. Cache hits are never refused for that reason.
 
 **"What would you do differently?"**
 Build the benchmark earlier. Two of my worst bugs, an O(n²) insert and a graph-routing failure,

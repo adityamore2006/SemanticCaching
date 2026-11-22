@@ -191,12 +191,12 @@ function render(query, data, error) {
       </div>`;
     div.className = "result " + kind;
     div.innerHTML = `
-      <span class="verdict">${data.hit ? "Hit" : "Miss"}</span><span class="q">${esc(query)}</span>
+      <span class="verdict">${data.hit ? "Hit" : data.coalesced ? "Shared" : "Miss"}</span><span class="q">${esc(query)}</span>
       <div class="meta">
         <span>similarity ${sim === null ? "n/a" : sim.toFixed(4)}</span>
         <span>threshold ${threshold}</span>
         <span>${data.latency_ms} ms</span>
-        <span>${data.hit ? "no model call" : "model called"}</span>
+        <span>${data.hit ? "no model call" : data.coalesced ? "shared another request's model call" : "model called"}</span>
       </div>${bar}
       <div class="answer">${esc(data.response)}</div>`;
   }
