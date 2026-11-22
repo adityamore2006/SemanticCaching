@@ -225,7 +225,7 @@ def query(request: QueryRequest, http_request: Request):
     try:
         with metrics.in_flight():
             result = router.route(request.query)
-        outcome = "hit" if result.hit else "miss"
+        outcome = "hit" if result.hit else "coalesced" if result.coalesced else "miss"
     except LLMTimeout as exc:
         metrics.incr(m.ERRORS_504)
         raise HTTPException(status_code=504, detail=f"{exc}; nothing was cached")
@@ -241,11 +241,12 @@ def query(request: QueryRequest, http_request: Request):
         latency_ms = (time.perf_counter() - arrived) * 1000
         metrics.observe(outcome, latency_ms)
 
-    metrics.incr(m.HITS if result.hit else m.MISSES)
+    metrics.incr({"hit": m.HITS, "coalesced": m.COALESCED, "miss": m.MISSES}[outcome])
 
     return {
         "response": result.response,
         "hit": result.hit,
+        "coalesced": result.coalesced,
         "similarity": result.similarity,
         "matched_id": result.matched_id,
         "latency_ms": round(latency_ms, 2),
@@ -276,13 +277,14 @@ def stats():
     cost-savings claim made countable rather than estimated. The fuller
     operational picture is at /metrics."""
     metrics = state["metrics"]
-    hits, misses = metrics.get(m.HITS), metrics.get(m.MISSES)
-    total = hits + misses
+    hits, misses, coalesced = metrics.get(m.HITS), metrics.get(m.MISSES), metrics.get(m.COALESCED)
+    total = hits + misses + coalesced
     return {
         "entries": len(state["router"].index),
         "requests": total,
         "hits": hits,
         "misses": misses,
+        "coalesced": coalesced,
         "hit_rate": round(hits / total, 4) if total else None,
         "threshold": THRESHOLD,
         "boot_seconds": state["boot_seconds"],

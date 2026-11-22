@@ -24,6 +24,7 @@ from typing import Callable, Hashable, Optional
 from cache_store import CacheStore, InMemoryCacheStore
 from embedder import Embedder
 from factory import create_index
+from single_flight import SingleFlight
 
 OPERATING_THRESHOLD = 0.80
 
@@ -50,6 +51,18 @@ class RouteResult:
     # Similarity of the closest existing entry, or None if the index was
     # empty. On a miss, how close the nearest entry came to the threshold.
     similarity: Optional[float] = None
+    # True when this request found no cache entry and did not call the model
+    # itself: an identical request was already waiting on the model, and this
+    # one shared its answer (see CacheRouter.route).
+    coalesced: bool = False
+
+
+def _flight_key(query: str) -> str:
+    """What counts as "the same question" for sharing one model call:
+    identical text, ignoring case and runs of whitespace. Deliberately not
+    similarity. Paraphrases are matched by the cache lookup once the first
+    answer is stored."""
+    return " ".join(query.split()).casefold()
 
 
 class CacheRouter:
@@ -76,6 +89,8 @@ class CacheRouter:
         # across the embedder, the LLM or a database write, so a slow model
         # call cannot block other requests.
         self._lock = threading.Lock()
+        # Identical concurrent misses share one model call.
+        self._flights = SingleFlight()
 
     def _nearest(self, vector):
         """(id, similarity) of the closest entry, or (None, None) if empty."""
@@ -84,25 +99,58 @@ class CacheRouter:
                 return None, None
             return self.index.search(vector, k=1)[0]
 
+    def _lookup(self, vector):
+        """Search the cache. Returns (hit, matched_id, similarity), where hit
+        is a RouteResult if the nearest entry clears the threshold, else None."""
+        matched_id, similarity = self._nearest(vector)
+        if matched_id is not None and similarity >= self.threshold:
+            cached = self.cache_store.get(matched_id)
+            if cached is None:
+                # _add writes the store before the index, and restore
+                # builds the index from the store, so a matched id with
+                # no stored response means something outside those paths
+                # changed the data. Serving None would be a confident
+                # wrong answer, and papering over it hides the bug, so
+                # fail loudly.
+                raise RuntimeError(
+                    f"index has {matched_id!r} but the store has no response "
+                    "for it; the cache is inconsistent and needs a reset"
+                )
+            hit = RouteResult(cached, hit=True, matched_id=matched_id, similarity=similarity)
+            return hit, matched_id, similarity
+        return None, matched_id, similarity
+
     def route(self, query: str) -> RouteResult:
         vector = self.embedder.embed(query)
 
-        matched_id, similarity = self._nearest(vector)
-        if matched_id is not None:
-            if similarity >= self.threshold:
-                cached = self.cache_store.get(matched_id)
-                if cached is None:
-                    # _add writes the store before the index, and restore
-                    # builds the index from the store, so a matched id with
-                    # no stored response means something outside those paths
-                    # changed the data. Serving None would be a confident
-                    # wrong answer, and papering over it hides the bug, so
-                    # fail loudly.
-                    raise RuntimeError(
-                        f"index has {matched_id!r} but the store has no response "
-                        "for it; the cache is inconsistent and needs a reset"
-                    )
-                return RouteResult(cached, hit=True, matched_id=matched_id, similarity=similarity)
+        hit, matched_id, similarity = self._lookup(vector)
+        if hit is not None:
+            return hit
+
+        # A miss. If an identical question is already waiting on the model,
+        # share its answer instead of asking again. The lock inside
+        # SingleFlight covers only the table lookup, never the model call, so
+        # different questions still run in parallel.
+        shared, led = self._flights.do(_flight_key(query), lambda: self._fill(query, vector))
+
+        if not led:
+            return RouteResult(
+                shared.response, hit=False, matched_id=matched_id,
+                similarity=similarity, coalesced=True,
+            )
+        if shared.hit:
+            return shared  # found by the re-check in _fill; no model call was made
+        return RouteResult(shared.response, hit=False, matched_id=matched_id, similarity=similarity)
+
+    def _fill(self, query, vector) -> RouteResult:
+        """Runs once per question at a time: the one place a model is called."""
+        # Look again first. route() searched before this flight started, and
+        # an earlier flight for the same question may have finished and stored
+        # its answer in between. Without this, that caller would pay for a
+        # model call whose answer is already in the cache.
+        hit, _, _ = self._lookup(vector)
+        if hit is not None:
+            return hit
 
         response = self.llm(query)
 
@@ -112,7 +160,7 @@ class CacheRouter:
             raise EmptyLLMResponse("llm returned an empty response; refusing to cache it")
 
         self._add(query_vector=vector, response=response, source=SOURCE_LLM)
-        return RouteResult(response, hit=False, matched_id=matched_id, similarity=similarity)
+        return RouteResult(response, hit=False)
 
     def seed(self, pairs) -> int:
         """Populate the cache from (question, answer) pairs without calling
