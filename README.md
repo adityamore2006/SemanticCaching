@@ -1,9 +1,7 @@
 # Semantic Cache for LLM APIs
 
 A service that caches LLM responses by meaning. When a new question is semantically equivalent
-to one already answered, it returns the stored answer instead of calling the model. It includes
-an overload-protection layer (thread safety, single-flight, load shedding, metrics) and a
-from-scratch HNSW vector index.
+to one already answered, it returns the stored answer instead of calling the model.
 
 ```
 MISS  sim=0.1657  "What's the weather in Chapel Hill?"                    model called
@@ -11,28 +9,29 @@ HIT   sim=0.9404  "Is it possible to combine my two separate accounts?"  no mode
 MISS  sim=0.7266  "Can I delete one of my two accounts?"                  no match: same topic, different question
 ```
 
-Output of `make tour`. The third query is topically close to a cached entry but asks a different
+Output of `make tour`. The third query is close in topic to a cached entry but asks a different
 question. It scores 0.7266, below the 0.80 threshold, so it goes to the model.
 
-## Infrastructure results
+The repository has three parts:
 
-The service runs request handlers on a pool of 40 threads that share one router, one index and
-one set of counters. Under concurrent load, three failures were reproduced and then fixed one at
-a time, each measured before and after.
-
-| Scenario | Before | After |
+| Part | Content | Where |
 |---|---|---|
-| 20 identical new questions at once: model calls | 20 | **1** |
-| 20 different new questions at once: total time | 3.3 s | 3.3 s (unchanged) |
-| One cached question while 60 slow questions run | 3.1 s | **0.11 s** |
-| The 60 slow questions | all answered, about 6 s | 24 answered, 36 refused immediately (503) |
-| Forced thread switching on a new cache, 40 trials | 15 trials lost entries or raised `KeyError` | 0 |
+| **Infrastructure layer** | Thread safety, metrics, single-flight, load shedding. Each problem was reproduced under concurrent load, fixed, and measured. | [Infrastructure layer](#infrastructure-layer), [`knowledge/concurrency.md`](knowledge/concurrency.md) |
+| **Vector index** | HNSW implemented without a vector library, benchmarked against exact brute-force search | [Retrieval and evaluation](#retrieval-and-evaluation), `src/hnsw.py` |
+| **Evaluation** | 194 labeled pairs used to choose the similarity threshold | [Retrieval and evaluation](#retrieval-and-evaluation), `eval/` |
 
-Measured with a fake model that waits 3 seconds. The embedder, index, SQLite and uvicorn are
-real. One 10-core laptop, synthetic traffic. Reproduce with `make loadtest`.
+Infrastructure results, in brief: 20 identical concurrent requests went from 20 model calls to 1,
+and a cached lookup during a burst of slow requests went from 3.1 s to 0.11 s.
 
-The 0.11 s does not meet the 100 ms target. The embedder is CPU-bound: 16 ms for one embedding,
-about 455 ms each when 40 run at once. See [Infrastructure layer](#infrastructure-layer).
+## Contents
+
+- [Quickstart](#quickstart)
+- [Problem](#problem)
+- [Architecture](#architecture)
+- [Infrastructure layer](#infrastructure-layer)
+- [Retrieval and evaluation](#retrieval-and-evaluation)
+- [API](#api) and [Configuration](#configuration)
+- [Repository layout](#repository-layout) and [Documentation](#documentation)
 
 ## Quickstart
 
@@ -56,7 +55,7 @@ With the service running, in a second terminal:
 | Command | Result |
 |---|---|
 | `make tour` | Labeled queries showing which hit, which miss, and the similarity of each |
-| `make loadtest` | Concurrency scenarios from the table above. Starts its own server on port 8765. |
+| `make loadtest` | The concurrency scenarios from the infrastructure results. Starts its own server on port 8765. |
 | `make reset` | Restores the cache to the 67 curated entries |
 | `make test` | 154 tests. No service and no Ollama required. |
 
@@ -87,7 +86,7 @@ answer. The threshold therefore has to be measured on labeled data.
 
 A second problem appears when the service handles concurrent requests. Handlers share one
 router and one index, identical requests each call the model, and slow model calls occupy the
-threads that cached lookups also need. [Infrastructure layer](#infrastructure-layer) covers
+threads that cached lookups also need. The [infrastructure layer](#infrastructure-layer) covers
 this.
 
 ## Architecture
@@ -215,55 +214,93 @@ specific to an embedding model.
 The OpenAI-compatible backend works with Ollama (the default), LM Studio, vLLM and OpenAI by
 changing `LLM_BASE_URL`, `LLM_MODEL` and `LLM_API_KEY`.
 
+Storage: SQLite is the source of truth. The HNSW index is rebuilt from it at startup. Cache hits
+read from memory and do not query the database. The file records which embedding model built it
+and refuses to open under a different one.
+
 ## Infrastructure layer
 
-### Starting condition
-
-The service uses uvicorn with one process. Plain `def` endpoints run on a pool of 40 worker
-threads shared by every endpoint. The pool is not divided between hits and misses, and a
+**Starting condition.** uvicorn runs one process. Plain `def` endpoints execute on a pool of 40
+worker threads shared by every endpoint. The pool is not divided between hits and misses, and a
 request waiting on the model holds its thread for the whole wait. All threads share one router,
-one HNSW index and one set of counters. A baseline was measured before any change.
+one HNSW index and one set of counters.
 
-### Components
+### Results
 
-| Component | Problem | Mechanism | Files |
+| Scenario | Before | After | Change |
 |---|---|---|---|
-| Thread safety | Two threads read the same id from the counter and overwrote each other's entry. A search ran during an HNSW insert and raised `KeyError`. | One lock guards the id counter and every index search and insert. Embedding, the model call and the SQLite write are outside it. | `cache_router.py`, `vector_index.py` |
-| Metrics | No model-call count, no error count, no timing. Handler timing cannot see a request waiting for a thread. | `Metrics` holds counters, an in-flight gauge and p50/p95/p99 over the latest 2,000 samples per kind. `MeteredLLM` counts every model call. `queue_wait` is stamped on the event loop before the handler is queued. | `metrics.py`, `metered_llm.py`, `api.py`, `scripts/loadtest.py` |
-| Single-flight | 20 identical new questions made 20 model calls and 20 duplicate entries. | A table of questions being worked on. The first request calls the model. Identical requests wait and share its answer. | `single_flight.py`, `cache_router.py` |
-| Load shedding | 60 slow misses occupied all 40 threads. A cached lookup waited about 3 s. | A cap on requests in the miss path (default 24). Requests beyond the cap are refused immediately with 503 and `Retry-After: 1`. Model timeout is configurable (default 30 s). | `limiter.py`, `cache_router.py`, `api.py` |
+| 20 identical new questions at once: model calls | 20 | **1** | [Single-flight](#3-single-flight) |
+| 20 different new questions at once: total time | 3.3 s | 3.3 s | Unchanged. Single-flight does not serialize them. |
+| One cached question while 60 slow questions run | 3.1 s | **0.11 s** | [Load shedding](#4-load-shedding-and-timeouts) |
+| The 60 slow questions | all answered, about 6 s | 24 answered, 36 refused immediately (503) | [Load shedding](#4-load-shedding-and-timeouts) |
+| Forced thread switching on a new cache, 40 trials | 15 trials lost entries or raised `KeyError` | 0 | [Thread safety](#1-thread-safety) |
 
-### Design decisions
+Measured with a fake model that waits 3 seconds. The embedder, index, SQLite and uvicorn are
+real. One 10-core laptop, synthetic traffic. Reproduce with `make loadtest`.
 
-- **Lock scope.** The lock covers memory operations only: the id counter, index search and index
-  insert. A lock held across the model call would serialize every miss.
-- **Single-flight instead of one lock around misses.** A single lock also prevents duplicate
-  calls, but 20 different 3 s questions would take 60 s instead of 3 s, and cached lookups would
-  wait behind them. Single-flight uses one entry per question, so different questions do not
-  wait for each other.
-- **Identical text, not similarity.** "Same question" means identical text after lowercasing and
-  collapsing whitespace. Paraphrases that arrive together each call the model. Sharing a call
-  between paraphrases (semantic single-flight) is not implemented.
-- **Leader re-check.** The leader searches the cache again before calling the model. Without
-  it, a request that searched just before an earlier flight finished would call the model for an
-  answer already stored.
-- **Failures are shared once and not remembered.** If the model call fails, the leader and all
-  waiting requests receive the same error. The next request starts a new attempt.
-- **Refuse instead of queue.** A request waiting for a slot would still hold one of the 40
-  threads. Refusing frees the thread immediately. Cache hits return before the cap and are never
-  refused for this reason.
-- **Waiting requests count toward the cap.** A request waiting on a shared answer also holds a
-  thread. With the default of 24, at least 16 threads remain available for hits. 30 identical
-  concurrent questions would have 6 refused, although one model call would serve all 30.
-- **503 instead of 429.** The condition is server capacity, not a per-client rate limit. Shed
-  requests are counted separately from model failures.
-- **Event-loop endpoints.** `/health` and `/metrics` are `async def`, so they respond when all
-  40 worker threads are busy.
-- **Strict settings.** `MAX_CONCURRENT_MISSES` and `LLM_TIMEOUT_SECONDS` reject `0`, negatives,
-  non-numbers and (for the timeout) `nan` and `inf`. `SEED_ON_EMPTY` rejects misspelled
-  booleans. All fail at startup.
-- **Request latency is measured from arrival.** `latency_ms` in the response and the latency
-  percentiles include the wait for a worker thread.
+The 0.11 s does not meet the 100 ms target. The embedder is CPU-bound: 16 ms for one embedding,
+about 455 ms each when 40 run at once. Every request is embedded before it is known to be a hit,
+so the miss-path cap does not help here.
+
+### 1. Thread safety
+
+- **Problem:** Two threads read the same id from the counter and overwrote each other's entry.
+  A search that ran during an HNSW insert raised `KeyError`, because the insert updated
+  `max_level` one line before `entry_point`.
+- **Change:** One lock guards the id counter and every index search and insert. The embedder,
+  the model call and the SQLite write run outside it.
+- **Result:** 0 lost entries or exceptions in 40 trials with forced thread switching. Before: 15
+  of 40.
+- **Tradeoff:** Searches run one at a time (0.7 ms per search and 1.9 ms per insert at 2,000
+  entries). A readers-writer lock would remove that, at a complexity cost not justified at this
+  scale.
+- **Files:** `cache_router.py`, `vector_index.py`
+
+### 2. Metrics and load test
+
+- **Problem:** The service counted hits and misses without a lock and counted nothing else.
+  Handler timing cannot see a request that is waiting for a worker thread.
+- **Change:** `GET /metrics` reports counters, an in-flight gauge and p50/p95/p99 latency over
+  the last 2,000 samples per kind. `MeteredLLM` counts every model call. `queue_wait` is stamped
+  on the event loop before the handler is queued, so it measures the wait for a worker thread.
+  `make loadtest` runs the scenarios above.
+- **Result:** Every number in the results table comes from this tooling. During the overload
+  scenario `queue_wait` p95 was 3.4 s, in line with the 3.1 s that clients saw.
+- **Tradeoff:** JSON output, not Prometheus format. Percentiles cover a recent window, not all
+  time. Requests rejected by validation (422) are not counted.
+- **Files:** `metrics.py`, `metered_llm.py`, `api.py`, `scripts/loadtest.py`
+
+### 3. Single-flight
+
+- **Problem:** 20 identical new questions made 20 model calls and wrote 20 duplicate entries.
+- **Change:** A table of questions being worked on. The first request calls the model. Identical
+  requests wait and share its answer (`coalesced: true`). The leader searches the cache once
+  more before calling the model, in case an earlier flight stored an answer after its first
+  lookup. If the model call fails, every waiting request receives the same error and nothing is
+  remembered.
+- **Result:** 1 model call and 1 entry for 20 identical requests. 20 different questions still
+  take 3.3 s in total, because they do not wait for each other.
+- **Tradeoff:** One lock around all misses would also prevent duplicates, but it would serialize
+  them: 20 different 3 s questions would take 60 s and cached lookups would queue behind them.
+  "Same question" means identical text after lowercasing and collapsing whitespace. Paraphrases
+  that arrive together each call the model.
+- **Files:** `single_flight.py`, `cache_router.py`
+
+### 4. Load shedding and timeouts
+
+- **Problem:** 60 slow misses occupied all 40 worker threads, and a cached lookup waited about
+  3 s for a thread.
+- **Change:** A cap on requests in the miss path (`MAX_CONCURRENT_MISSES`, default 24). Requests
+  over the cap get 503 with `Retry-After: 1` immediately. Cache hits never use the cap. The model
+  timeout is configurable (`LLM_TIMEOUT_SECONDS`, default 30). `/health` and `/metrics` are
+  `async def`, so they respond when all worker threads are busy.
+- **Result:** A cached lookup during the burst took 0.11 s instead of 3.1 s. 24 of the 60 slow
+  requests were served and 36 refused.
+- **Tradeoff:** Requests are refused instead of queued, because a queued request still holds a
+  thread. Requests waiting on a shared answer count toward the cap, so 30 identical concurrent
+  questions would have 6 refused even though one model call would serve all 30. The status is 503
+  because the condition is server capacity, not a per-client rate limit.
+- **Files:** `limiter.py`, `cache_router.py`, `api.py`
 
 ### Observability
 
@@ -282,16 +319,14 @@ one HNSW index and one set of counters. A baseline was measured before any chang
 
 - Tests start 20 threads together with `sys.setswitchinterval(1e-6)`, which makes unfavorable
   thread interleavings likely. The thread-safety and single-flight tests fail on the unfixed
-  code. The load-shedding tests were written and passed together with the code; `make loadtest`
-  is the behavioral evidence for that change.
+  code. The load-shedding tests were written and passed together with the code, so
+  `make loadtest` is the behavioral evidence for that change.
 - The service was also run against real Ollama: a miss, a hit, six identical concurrent
   questions (1 model call, 5 coalesced), and a restart with the cache intact.
 
 ### Limitations
 
-- A cached lookup during a burst takes about 110 ms instead of 17 ms. Every request is embedded
-  before it is known to be a hit, and the embedder is CPU-bound. The miss-path cap does not
-  address this.
+- A cached lookup during a burst takes about 110 ms instead of 17 ms (see Results).
 - Single-flight matches identical text only.
 - The service must run as one process. With several workers, each process would build its own
   index and assign its own ids against the same SQLite file.
@@ -300,7 +335,7 @@ one HNSW index and one set of counters. A baseline was measured before any chang
 - Measurements use a fake model. A real model has its own concurrency limits and variable
   latency.
 
-Full write-up with all numbers: [`knowledge/concurrency.md`](knowledge/concurrency.md).
+Full write-up: [`knowledge/concurrency.md`](knowledge/concurrency.md).
 
 ## Retrieval and evaluation
 
@@ -382,7 +417,7 @@ Two defects were found by benchmarking at larger n:
 | Endpoint | Description |
 |---|---|
 | `POST /query` | Body `{"query": "..."}`, 1 to 2000 characters. Returns `response`, `hit`, `coalesced`, `similarity`, `matched_id`, `latency_ms`. |
-| `GET /metrics` | Counters, model calls, latency percentiles, gauges (see above) |
+| `GET /metrics` | Counters, model calls, latency percentiles, gauges (see Observability) |
 | `GET /stats` | Entries, hits, misses, hit rate. Used by the demo page. |
 | `GET /health` | Liveness |
 | `POST /admin/reset` | Restores the curated corpus. Requires header `X-Reset-Token`. Returns 404 unless `RESET_TOKEN` is set. |
@@ -411,9 +446,7 @@ Environment variables, all optional. `MAX_CONCURRENT_MISSES`, `LLM_TIMEOUT_SECON
 | `RESET_TOKEN` | unset | Enables `POST /admin/reset`. `make run` sets `dev-token`. |
 | `SEED_ON_EMPTY` | `true` | Load the curated corpus when the cache is empty |
 
-Storage: SQLite is the source of truth. The HNSW index is rebuilt from it at startup. Cache hits
-read from memory and do not query the database. The file records which embedding model built it
-and refuses to open under a different one.
+Run one server process. See the limitations above.
 
 ## Repository layout
 
@@ -431,7 +464,6 @@ and refuses to open under a different one.
 | `scripts/` | `loadtest.py`, `try_queries.py`, `reset_cache.py` |
 | `eval/`, `data/` | Evaluation and benchmark scripts; labeled pairs, anchors, seed answers |
 | `tests/` | 154 tests. None require Ollama or network access. |
-| `knowledge/` | `concurrency.md` (infrastructure write-up), `learned.md` (decision log), `resume.md` |
 
 ## Documentation
 
@@ -441,14 +473,5 @@ and refuses to open under a different one.
   threshold, evaluation and earlier design stages. It is a log written during development, so
   sections on the removed AWS deployment (Lambda, EC2, DynamoDB, Bedrock) describe code that is
   no longer in the repository. Section 25 explains the change to a local setup.
-
-## History
-
-| Stage | Content |
-|---|---|
-| 1 | Linear search, evaluation harness, 194-pair set, 0.80 threshold |
-| 2 | HNSW from scratch, benchmarked against linear search |
-| 3 | Cache router: embed, search, hit or miss, store |
-| 4 | AWS deployment (Lambda, then EC2 with DynamoDB and Bedrock). Built, measured, later removed. |
-| 5 | Local setup: SQLite store, pluggable LLM, no cloud dependency |
-| 6 | Infrastructure layer: thread safety, metrics, single-flight, load shedding |
+- [`knowledge/resume.md`](knowledge/resume.md): summary bullets and interview answers, with each
+  number traced to a measurement.
